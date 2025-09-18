@@ -1,0 +1,12 @@
+.env
+.ssh/
+out/
+.rag_store/
+.venv/
+.vscode/
+.idea/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.DS_Store
+__pycache__/

@@ -1,0 +1,11 @@
+requests
+BAScraper
+numpy
+tqdm
+faiss-cpu
+fastapi
+uvicorn
+openai
+python-dotenv
+voyageai
+rank-bm25
