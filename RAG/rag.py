@@ -35,137 +35,27 @@ python rag.py ask --query "What helps with minoxidil shedding?" --k 8 --store .r
 """
 
 from __future__ import annotations
-import os, re, json, argparse, sys, pickle, math
+import os, re, json, argparse, sys, pickle
 from dataclasses import asdict
-from typing import List, Tuple, Dict, Optional
+from typing import List, Dict, Optional
 
-import numpy as np
-from tqdm import tqdm
 from dotenv import load_dotenv
-import faiss
 
 
 # Load environment variables early
 load_dotenv()
 
 
-from RAG.models import Chunk
-from RAG.ai import embed_texts as voyage_embed_texts
-from RAG.ingest import ingest_posts_jsonl, ingest_comments_jsonl
-from RAG.pipeline import Pipeline
-
-
-EMBED_BATCH = int(os.getenv("RAG_EMBED_BATCH", 64))
+from models import Chunk
+from ingest import ingest_posts_jsonl, ingest_comments_jsonl
+from pipeline import Pipeline
+from embedder import build_embedding_index
 
 
 # --------------------- Utils ---------------------
 _word_re = re.compile(r"\w+")
 
-
-def embed_texts(texts: List[str]) -> np.ndarray:
-    return voyage_embed_texts(texts, EMBED_BATCH)
-
-
 # --------------------- Index build ----------------
-def build_embedding_index(chunks: List[Chunk], store_dir: str, faiss_write_y: Optional[int] = None) -> Dict[str, int]:
-    os.makedirs(store_dir, exist_ok=True)
-
-    meta_path = os.path.join(store_dir, 'meta.jsonl')
-    idmap_path = os.path.join(store_dir, 'idmap.json')
-    faiss_path = os.path.join(store_dir, 'faiss.index')
-
-    # Load existing ids from idmap to support incremental/resumable indexing
-    existing_ids: set = set()
-    idmap_existing: Dict[str, int] = {}
-    if os.path.exists(idmap_path):
-        try:
-            with open(idmap_path, 'r', encoding='utf-8') as f:
-                idmap_existing = json.load(f)
-            existing_ids.update(idmap_existing.keys())
-        except Exception:
-            pass
-
-    new_chunks = [c for c in chunks if c.id not in existing_ids]
-    added_meta = 0
-    added_embeddings = 0
-
-    print(f"There are {len(new_chunks)} new chunks to embed.")
-
-    # Load existing FAISS index if present
-    index = faiss.read_index(faiss_path) if os.path.exists(faiss_path) else None
-
-    if new_chunks:
-        # Configure write schedule
-        use_schedule = isinstance(faiss_write_y, int) and faiss_write_y is not None and faiss_write_y > 2
-        batch_idx = 0
-        next_write_at = 1  # Always write first batch
-
-        pending_meta_lines: List[str] = []
-
-        def flush_to_disk():
-            nonlocal pending_meta_lines
-            print(f"Flushing to disk at batch {batch_idx}.")
-            # Persist FAISS index
-            faiss.write_index(index, faiss_path)
-            # Persist id map
-            print(f"Persisting id map to {idmap_path}.")
-            with open(idmap_path, 'w', encoding='utf-8') as f:
-                json.dump(idmap_existing, f)
-            # Append pending meta lines
-            if pending_meta_lines:
-                print(f"Appending {len(pending_meta_lines)} pending meta lines to {meta_path}.")
-                with open(meta_path, 'a', encoding='utf-8') as mf:
-                    for line in pending_meta_lines:
-                        mf.write(line)
-                pending_meta_lines = []
-
-        for i in range(0, len(new_chunks), EMBED_BATCH):
-            batch_idx += 1
-            batch_chunks = new_chunks[i:i+EMBED_BATCH]
-            texts_batch = [c.text for c in batch_chunks]
-            try:
-                X_batch = embed_texts(texts_batch)
-            except Exception as e:
-                print(f"(embed batch failed, skipping) {e}")
-                continue
-            if index is None:
-                d = X_batch.shape[1]
-                index = faiss.IndexFlatIP(d)
-            start_idx = index.ntotal
-            index.add(X_batch)
-
-            # Update idmap (in-memory) for this batch
-            for offset, ch in enumerate(batch_chunks):
-                idmap_existing[ch.id] = start_idx + offset
-
-            # Buffer metadata lines for this batch
-            for ch in batch_chunks:
-                pending_meta_lines.append(json.dumps(asdict(ch), ensure_ascii=False) + "\n")
-                added_meta += 1
-            added_embeddings += len(batch_chunks)
-
-            # Decide whether to write to disk now
-            if not use_schedule:
-                # Legacy behavior: write each batch
-                flush_to_disk()
-            else:
-                if batch_idx >= next_write_at:
-                    flush_to_disk()
-                    # After writing at j=batch_idx, next write at ceil(j * x) where x=y/(y-1)
-                    y = faiss_write_y
-                    next_write_at = math.ceil(batch_idx * y / (y - 1))
-
-        # Final flush to ensure last batches are persisted
-        if use_schedule and pending_meta_lines:
-            flush_to_disk()
-
-    return {
-        'parsed': len(chunks),
-        'new_meta': added_meta,
-        'new_embeddings': added_embeddings,
-    }
-
-
 def build_bm25_index(chunks: List[Chunk], store_dir: str) -> Dict[str, int]:
     os.makedirs(store_dir, exist_ok=True)
 
@@ -231,7 +121,14 @@ def cmd_index_jsonl(args):
     build_embeddings = mode in ('embed','both')
     build_bm25 = mode in ('keyword','both')
     print(f"Building indexes into {store} (parsed_submissions={len(chunks)}; mode={mode}) …")
-    stats_total = {'parsed': len(chunks), 'new_meta': 0, 'new_embeddings': 0, 'new_bm25': 0}
+    stats_total = {
+        'parsed': len(chunks),
+        'new_meta': 0,
+        'new_embeddings': 0,
+        'new_bm25': 0,
+        'skipped_existing': 0,
+        'failed_batches': 0,
+    }
     if build_embeddings:
         # Validate FAISS write schedule parameter if provided
         y = getattr(args, 'faiss_write_y', None)
@@ -244,13 +141,22 @@ def cmd_index_jsonl(args):
             if y < 2:
                 print("--faiss-write-y must be an integer >= 2")
                 sys.exit(2)
-        s = build_embedding_index(chunks, store, faiss_write_y=y)
-        stats_total['new_meta'] += s.get('new_meta', 0)
-        stats_total['new_embeddings'] += s.get('new_embeddings', 0)
+        s = build_embedding_index(chunks, store, faiss_write_y=y, embed_workers=getattr(args, 'embed_workers', 1))
+        stats_total['parsed'] = max(stats_total['parsed'], s.get('parsed', 0))
+        for key in ('new_meta', 'new_embeddings', 'skipped_existing', 'failed_batches'):
+            stats_total[key] += s.get(key, 0)
     if build_bm25:
         s = build_bm25_index(chunks, store)
         stats_total['new_bm25'] += s.get('new_bm25', 0)
-    print(f"Done. ✅  parsed={stats_total['parsed']}, new_meta={stats_total['new_meta']}, new_embeddings={stats_total['new_embeddings']}, new_bm25={stats_total['new_bm25']}")
+    print(
+        "Done. ✅  "
+        f"parsed={stats_total['parsed']}, "
+        f"new_meta={stats_total['new_meta']}, "
+        f"new_embeddings={stats_total['new_embeddings']}, "
+        f"skipped_existing={stats_total['skipped_existing']}, "
+        f"failed_batches={stats_total['failed_batches']}, "
+        f"new_bm25={stats_total['new_bm25']}"
+    )
 
 
 def cmd_ask(args):
@@ -296,6 +202,7 @@ if __name__ == "__main__":
     ap_j.add_argument("--store", default=".rag_store")
     ap_j.add_argument("--index-mode", choices=['embed','keyword','both'], default='both', help="Which index artifacts to build")
     ap_j.add_argument("--faiss-write-y", type=int, required=False, help="Write FAISS/idmap/meta every ceil(j * y/(y-1)) batches; y must be > 2")
+    ap_j.add_argument("--embed-workers", type=int, default=int(os.getenv("RAG_EMBED_WORKERS", "1")), help="Number of embedding workers (default from RAG_EMBED_WORKERS or 1)")
     ap_j.set_defaults(func=cmd_index_jsonl)
 
     ap_q = sub.add_parser("ask", help="Ask a question against the index")

@@ -2,9 +2,9 @@ from __future__ import annotations
 import os
 from typing import Dict, List, Tuple
 
-from .models import Candidate
-from .retrievers import VectorRetriever, KeywordRetriever
-from .ai import maybe_xai_answer
+from models import Candidate
+from retrievers import VectorRetriever, KeywordRetriever
+from ai import maybe_xai_answer
 
 
 MAX_CONTEXT_WORDS = int(os.getenv("RAG_MAX_CTX_WORDS", 100000))
