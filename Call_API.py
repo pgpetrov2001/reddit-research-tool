@@ -165,9 +165,6 @@ def _log_validate(label: str, total: int, unique: int, dup: int, examples: List[
 # Use true 1-hour bins for coverage detection to avoid gaps/overfetching
 BIN_SECONDS = 24 * 3600  # 1 hour bins to detect coverage & gaps
 
-def _parse_date_any(s: Optional[str]) -> Optional[dt.datetime]:
-    return _fmt_dt(s)
-
 def _epoch_from_created(created: Any) -> Optional[int]:
     """created_utc can be epoch seconds or ISO; return epoch seconds int."""
     if created is None:
@@ -227,26 +224,6 @@ def _read_covered_bins(path: Path) -> Set[int]:
         return set()
     except Exception:
         return set()
-
-def _write_covered_bins(path: Path, bins: Set[int]) -> None:
-    """Persist covered bin indices to sidecar file (sorted for readability)."""
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(sorted(int(b) for b in bins), f, ensure_ascii=False)
-    except Exception:
-        # Best-effort; don't fail the main flow on metadata write
-        pass
-
-def _bins_from_sources(jsonl_path: Path) -> Set[int]:
-    """Combine sidecar (authoritative) with JSONL-inferred bins (fallback) to avoid redundant refetches."""
-    bins = _read_covered_bins(_coverage_sidecar_path(jsonl_path))
-    if not bins:
-        # Fallback to what's already in the JSONL to prevent needless refetching
-        bins = _bins_from_file(jsonl_path)
-    else:
-        bins.update(_bins_from_file(jsonl_path))
-    return bins
 
 # ---------- interval coverage (bin-agnostic) ----------
 def _normalize_iso(s: Optional[str]) -> Optional[str]:
@@ -438,49 +415,6 @@ def _hour_bins_for_range(after_iso: Optional[str], before_iso: Optional[str]) ->
     start_bin = _hour_bin(a_epoch)
     end_bin_exclusive = _hour_bin(b_epoch - 1) + 1
     return list(range(start_bin, end_bin_exclusive))
-
-def _partition_bins(target_bins: List[int], covered_bins: Set[int]) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
-    """
-    Partition target bins into coalesced covered_ranges and missing_ranges of (start_bin, end_bin_excl).
-    """
-    covered_ranges: List[Tuple[int, int]] = []
-    missing_ranges: List[Tuple[int, int]] = []
-    if not target_bins:
-        return covered_ranges, missing_ranges
-
-    current_state: Optional[bool] = None  # True=covered, False=missing
-    run_start: Optional[int] = None
-
-    for b in target_bins:
-        is_cov = (b in covered_bins)
-        if current_state is None:
-            current_state = is_cov
-            run_start = b
-            continue
-        if is_cov != current_state:
-            if current_state:
-                covered_ranges.append((run_start, b))
-            else:
-                missing_ranges.append((run_start, b))
-            current_state = is_cov
-            run_start = b
-
-    if run_start is not None:
-        end = target_bins[-1] + 1
-        if current_state:
-            covered_ranges.append((run_start, end))
-        else:
-            missing_ranges.append((run_start, end))
-
-    return covered_ranges, missing_ranges
-
-def _binrange_to_iso(range_pair: Tuple[int, int]) -> Tuple[str, str]:
-    """Convert (start_bin, end_bin_excl) to ([after_iso], [before_iso]) with Z suffix."""
-    sb, eb = range_pair
-    after_iso = _format_iso_Z(sb * BIN_SECONDS)
-    before_iso = _format_iso_Z(eb * BIN_SECONDS)
-    return after_iso, before_iso
-
 
 # ---------- exhaustive fetching (pager) ----------
 def _cap_guess(limit: Union[str, int]) -> int:
