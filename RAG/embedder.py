@@ -289,12 +289,12 @@ def build_embedding_index(
             for idx, batch in enumerate(chunk_batches)
         }
 
-        with tqdm(total=len(new_chunks), desc="Embedding", unit="chunk") as pbar:
+        with tqdm(total=len(new_chunks), desc="Embedding", unit="batch") as pbar:
             for future in as_completed(futures):
                 idx, items, vectors = future.result()
                 queue_result(idx, items, vectors)
                 if vectors is not None:
-                    pbar.update(len(items))
+                    pbar.update(1)
 
     # Ensure all buffered state is persisted
     store.flush(force=True)
