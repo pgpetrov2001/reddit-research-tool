@@ -9,3 +9,4 @@ openai
 python-dotenv
 voyageai
 rank-bm25
+pytest
