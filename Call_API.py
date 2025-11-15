@@ -34,11 +34,11 @@ def compute_histogram(
     cache_dir: Path,
     kind: str,
     subreddit: str,
-    after: Optional[str],
-    before: Optional[str],
+    after: str,
+    before: str,
     workers: int,
 ) -> Tuple[List[Tuple[str, int]], Optional[str]]:
-    if workers <= 1:
+    if workers < 1:
         return [], None
     print(f"[{kind}] Computing histogram for partitioning ({workers} workers)...", flush=True)
     for freq in FREQUENCY_ORDER:
@@ -67,8 +67,8 @@ def planned_partitions(
     cache_dir: Path,
     kind: str,
     subreddit: str,
-    after: Optional[str],
-    before: Optional[str],
+    after: str,
+    before: str,
     workers: int,
     force_histogram: bool = False,
 ) -> List[WorkerPlan]:
@@ -84,7 +84,7 @@ def planned_partitions(
         parts, totals = compute_naive_partitions(after, before, workers)
     else:
         parts, totals = compute_partitions(
-            after=after, before=before, workers=workers, histogram=histogram
+            after=after, before=before, workers=workers, histogram=histogram, frequency=frequency
         )
     
     total_expected = sum(t for t in totals if t is not None) if totals else 0
@@ -180,11 +180,11 @@ def download_kind(kind: str, api_factory, args) -> None:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Download subreddit data from Arctic Shift API with worker partitioning.")
     parser.add_argument("-s", "--subreddit", required=True)
-    parser.add_argument("--after", type=parse_iso_date, help="ISO8601 start, inclusive")
-    parser.add_argument("--before", type=parse_iso_date, help="ISO8601 end, exclusive")
+    parser.add_argument("--after", type=parse_iso_date, help="ISO8601 start, inclusive", required=True)
+    parser.add_argument("--before", type=parse_iso_date, help="ISO8601 end, exclusive", required=True)
     parser.add_argument("--workers", type=int, default=4, help="Number of worker splits")
-    parser.add_argument("--what", choices=["posts", "comments", "both"], default="posts")
-    parser.add_argument("--outdir", help="Output directory")
+    parser.add_argument("--what", choices=["posts", "comments", "both"], default="both")
+    parser.add_argument("--outdir", help="Output directory", required=True)
     parser.add_argument("--force-histogram", action="store_true", help="Force histogram-based partitioning, fail if histogram cannot be computed")
     parser.add_argument(
         "--post_fields",

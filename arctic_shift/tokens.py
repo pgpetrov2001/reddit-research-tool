@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from dateutil.relativedelta import relativedelta
 from typing import Optional
 
 
@@ -25,6 +26,20 @@ def format_iso(ts: dt.datetime) -> str:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=dt.timezone.utc)
     return ts.astimezone(dt.timezone.utc).strftime(ISO_FORMAT)
+
+
+def duration_from_string(s: str):
+    s = s.lower()
+    if s == "day":
+        return dt.timedelta(days=1)
+    elif s == "week":
+        return dt.timedelta(weeks=1)
+    elif s == "month":
+        return relativedelta(months=1)
+    elif s == "year":
+        return relativedelta(years=1)
+    else:
+        raise ValueError(f"Unknown duration: {s}")
 
 
 def normalize_created(value) -> Optional[str]:

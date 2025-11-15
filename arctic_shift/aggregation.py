@@ -109,8 +109,8 @@ def ensure_histogram(
     frequency: str,
     kind: str,
     subreddit: str,
-    after: Optional[str],
-    before: Optional[str],
+    after: str,
+    before: str,
 ) -> List[Tuple[str, int]]:
     cache_path = _cache_path(cache_dir, subreddit, kind, frequency)
     cached = _load_cache(cache_path)
@@ -135,14 +135,14 @@ def ensure_histogram(
 
     additions: List[Tuple[str, int]] = []
 
-    if after and parse_iso_ts(after) < parse_iso_ts(cover_after):
+    if parse_iso_ts(after) < parse_iso_ts(cover_after):
         print(f"  Fetching additional data before cached range (before {cover_after})", flush=True)
         front_before = cover_after
         buckets = api.aggregate(kind, subreddit=subreddit, after=after, before=front_before, frequency=frequency)
         additions.extend(_buckets_to_list(buckets))
         cover_after = after
 
-    if before and parse_iso_ts(before) > parse_iso_ts(cover_before):
+    if parse_iso_ts(before) > parse_iso_ts(cover_before):
         print(f"  Fetching additional data after cached range (after {cover_before})", flush=True)
         tail_after = cover_before
         buckets = api.aggregate(kind, subreddit=subreddit, after=tail_after, before=before, frequency=frequency)

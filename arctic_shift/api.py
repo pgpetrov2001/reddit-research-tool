@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 import requests
 
 from .validation import validate_bucket
-
+from .tokens import duration_from_string
 from .tokens import format_iso, parse_iso_ts
 
 
@@ -75,18 +75,15 @@ class ArcticShiftAPI:
         result = self._get_json_with_retries(path, cleaned)
         return self._extract_items(result["data"]), result["headers"]
 
-    def aggregate(self, kind: str, *, subreddit: str, after: Optional[str], before: Optional[str], frequency: str) -> List[Dict[str, Any]]:
+    def aggregate(self, kind: str, *, subreddit: str, after: str, before: str, frequency: str) -> List[Dict[str, Any]]:
         try:
             # Store original boundaries for filtering at the end
             original_after = after
             original_before = before
             
             # Align interval endpoints to frequency boundaries
-            if after and before:
-                aligned_after, aligned_before = self._align_interval_endpoints(after, before, frequency)
-                print(f"Aligned interval from [{after}, {before}) to [{aligned_after}, {aligned_before})", flush=True)
-                after = aligned_after
-                before = aligned_before
+            after, before = self._align_interval_endpoints(after, before, frequency)
+            print(f"Aligned interval from [{original_after}, {original_before}) to [{after}, {before})", flush=True)
             
             # Fetch data with aligned boundaries
             buckets = self._aggregate_with_split(
@@ -98,9 +95,7 @@ class ArcticShiftAPI:
                 depth=0,
             )
             
-            # Filter to only include buckets within original interval
-            if original_after or original_before:
-                buckets = self._filter_buckets_to_interval(buckets, original_after, original_before)
+            buckets = self._filter_buckets_to_interval(buckets, original_after, original_before, frequency)
             
             return buckets
         except Exception as exc:  # noqa: BLE001
@@ -228,8 +223,9 @@ class ArcticShiftAPI:
     @staticmethod
     def _filter_buckets_to_interval(
         buckets: List[Dict[str, Any]],
-        after: Optional[str],
-        before: Optional[str]
+        after: str,
+        before: str,
+        frequency: str
     ) -> List[Dict[str, Any]]:
         """
         Filter buckets to only include those within the specified interval [after, before).
@@ -242,24 +238,22 @@ class ArcticShiftAPI:
         Returns:
             Filtered list of buckets
         """
-        if not after and not before:
-            return buckets
-        
         filtered = []
-        after_dt = parse_iso_ts(after) if after else None
-        before_dt = parse_iso_ts(before) if before else None
+        after_dt = parse_iso_ts(after)
+        before_dt = parse_iso_ts(before)
         
         for bucket in buckets:
             result = validate_bucket(bucket)
             if result is None:
+                print(f"[WARN] Invalid bucket encountered (skipping): {bucket}")
                 continue
             ts_str, _ = result
             bucket_dt = parse_iso_ts(ts_str)
             
             # Check if bucket is within interval [after, before)
-            if after_dt and bucket_dt < after_dt:
+            if bucket_dt + duration_from_string(frequency) < after_dt:
                 continue
-            if before_dt and bucket_dt >= before_dt:
+            if bucket_dt >= before_dt:
                 continue
             
             filtered.append(bucket)
@@ -323,6 +317,8 @@ class ArcticShiftAPI:
         
         Returns overlapping ranges to ensure no data is missed due to rounding.
         The overlap will be deduplicated by _collapse_buckets.
+
+        Assumes the after and before parameters are apriori aligned to the frequency boundaries
         """
         start = parse_iso_ts(after)
         end = parse_iso_ts(before)
@@ -345,12 +341,8 @@ class ArcticShiftAPI:
         mid_ceil = parse_iso_ts(mid_aligned_before)
         
         # If floor alignment is too close to start or end, can't split
-        if mid_floor <= start or mid_floor >= end:
+        if mid_floor <= start or mid_ceil >= end:
             return None
-        
-        # Ensure ceiling doesn't exceed end boundary
-        if mid_ceil > end:
-            mid_ceil = mid_floor
         
         # Create overlapping ranges:
         # First range: [after, mid_ceil) covers everything up to and including mid boundary
@@ -392,4 +384,3 @@ class ArcticShiftAPI:
         return [
             merged[ts] for ts in sorted(merged.keys(), key=lambda item: parse_iso_ts(item))
         ]
-
