@@ -6,9 +6,9 @@ from typing import List
 
 from rank_bm25 import BM25Okapi
 
-from models import Candidate
-from vector_store import VectorStore
-from ai import embed_query, maybe_xai_keywords
+from .models import Candidate
+from .vector_store import VectorStore
+from .ai import embed_query, maybe_xai_keywords
 import re
 
 _word_re = re.compile(r"\w+")

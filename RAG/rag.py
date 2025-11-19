@@ -46,10 +46,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-from models import Chunk
-from ingest import ingest_posts_jsonl, ingest_comments_jsonl
-from pipeline import Pipeline
-from embedder import build_embedding_index
+from .models import Chunk
+from .ingest import ingest_posts_jsonl, ingest_comments_jsonl
+from .pipeline import Pipeline
+from .embedder import build_embedding_index
 
 
 # --------------------- Utils ---------------------

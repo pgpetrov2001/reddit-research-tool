@@ -5,7 +5,7 @@ from typing import Dict, List, Tuple
 
 import faiss
 
-from models import Chunk
+from .models import Chunk
 
 
 class VectorStore:

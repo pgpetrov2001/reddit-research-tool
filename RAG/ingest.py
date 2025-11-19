@@ -2,7 +2,7 @@ from __future__ import annotations
 import json, os, time
 from typing import List, Optional, Tuple
 from dataclasses import dataclass
-from models import Chunk
+from .models import Chunk
 
 
 def _try_parse_json_line(line: str) -> Optional[dict]:

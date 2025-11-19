@@ -58,14 +58,30 @@ class ServerConfig:
     def get_subreddit_directory(cls, subreddit: str) -> str:
         """
         Get the directory path for a subreddit's vector store.
+        Handles case-insensitive matching of subreddit names.
 
         Args:
             subreddit: Name of the subreddit
 
         Returns:
-            Absolute path to the subreddit's directory
+            Absolute path to the subreddit's RAG store directory
         """
-        return str(cls.SUBREDDITS_DIR / subreddit)
+        # First try exact match
+        exact_path = cls.SUBREDDITS_DIR / subreddit / f"{subreddit}_RAG_store"
+        if exact_path.exists():
+            return str(exact_path)
+
+        # If exact match fails, try case-insensitive search
+        if cls.SUBREDDITS_DIR.exists():
+            for dir_entry in cls.SUBREDDITS_DIR.iterdir():
+                if dir_entry.is_dir() and dir_entry.name.lower() == subreddit.lower():
+                    # Found a case-insensitive match
+                    rag_store_path = dir_entry / f"{dir_entry.name}_RAG_store"
+                    if rag_store_path.exists():
+                        return str(rag_store_path)
+
+        # Return the original path if no match found (will fail later with proper error)
+        return str(exact_path)
 
 
 # ============================================================================
@@ -104,15 +120,15 @@ class QueryProcessor:
         # Retrieve candidates from each subreddit
         for subreddit in subreddits:
             try:
-                subreddit_dir = ServerConfig.get_subreddit_directory(subreddit)
+                rag_store_dir = ServerConfig.get_subreddit_directory(subreddit)
 
-                # Check if subreddit data exists
-                if not os.path.exists(subreddit_dir):
-                    print(f"WARNING: Subreddit '{subreddit}' does not exist in SubReddits folder. Skipping...")
+                # Check if RAG store directory exists
+                if not os.path.exists(rag_store_dir):
+                    print(f"WARNING: RAG store for subreddit '{subreddit}' does not exist at {rag_store_dir}. Skipping...")
                     continue
 
                 # Retrieve candidates from vector database
-                vec_db = VectorRetriever(subreddit_dir)
+                vec_db = VectorRetriever(rag_store_dir)
                 new_candidates = vec_db.retrieve(question, topk=k)
                 candidates.extend(new_candidates)
                 print(f"Retrieved {len(new_candidates)} candidates from r/{subreddit}")
@@ -287,8 +303,27 @@ class RedditDataRequestHandler(BaseHTTPRequestHandler):
             print("---------------------\n")
 
             # Extract and validate request parameters
-            subreddits = data.get("subreddits", [])
-            question = data.get("question", "")
+            subreddits_raw = data.get("subreddits", [])
+            question_data = data.get("question", "")
+
+            # Handle subreddits - can be list of strings or list of dicts with 'name' field
+            subreddits = []
+            if isinstance(subreddits_raw, list):
+                for item in subreddits_raw:
+                    if isinstance(item, str):
+                        subreddits.append(item)
+                    elif isinstance(item, dict) and "name" in item:
+                        subreddits.append(item["name"])
+                    else:
+                        print(f"WARNING: Skipping invalid subreddit item: {item}")
+
+            # Handle question - can be string or dict with 'title'/'description' fields
+            if isinstance(question_data, dict):
+                question = question_data.get("title", "")
+                if not question:
+                    question = question_data.get("description", "")
+            else:
+                question = question_data
 
             # Validate subreddits parameter
             if not subreddits:
