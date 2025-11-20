@@ -58,29 +58,16 @@ class ServerConfig:
     def get_subreddit_directory(cls, subreddit: str) -> str:
         """
         Get the directory path for a subreddit's vector store.
-        Handles case-insensitive matching of subreddit names.
+        Uses case-sensitive matching of subreddit names.
 
         Args:
-            subreddit: Name of the subreddit
+            subreddit: Name of the subreddit (case-sensitive)
 
         Returns:
             Absolute path to the subreddit's RAG store directory
         """
-        # First try exact match
+        # Use exact case-sensitive match only
         exact_path = cls.SUBREDDITS_DIR / subreddit / f"{subreddit}_RAG_store"
-        if exact_path.exists():
-            return str(exact_path)
-
-        # If exact match fails, try case-insensitive search
-        if cls.SUBREDDITS_DIR.exists():
-            for dir_entry in cls.SUBREDDITS_DIR.iterdir():
-                if dir_entry.is_dir() and dir_entry.name.lower() == subreddit.lower():
-                    # Found a case-insensitive match
-                    rag_store_path = dir_entry / f"{dir_entry.name}_RAG_store"
-                    if rag_store_path.exists():
-                        return str(rag_store_path)
-
-        # Return the original path if no match found (will fail later with proper error)
         return str(exact_path)
 
 
@@ -154,8 +141,8 @@ class QueryProcessor:
         if not answer:
             answer = "AI answer generation is not configured (missing XAI_API_KEY)"
 
-        # Format the response
-        posts = ResponseFormatter.format_posts(best_candidates)
+        # Format the response with comments
+        posts = ResponseFormatter.format_posts(best_candidates, subreddits)
 
         return {
             "status": "success",
@@ -167,6 +154,71 @@ class QueryProcessor:
 
 
 # ============================================================================
+# Comment Loading
+# ============================================================================
+
+class CommentLoader:
+    """Handles loading and filtering comments from JSONL files."""
+
+    @staticmethod
+    def load_comments_for_posts(post_ids: List[str], subreddits: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Load comments for specific post IDs from subreddit comment files.
+
+        Args:
+            post_ids: List of Reddit post IDs to load comments for
+            subreddits: List of subreddit names to search in
+
+        Returns:
+            Dictionary mapping post_id -> list of comment dictionaries
+        """
+        comments_by_post: Dict[str, List[Dict[str, Any]]] = {pid: [] for pid in post_ids}
+
+        for subreddit in subreddits:
+            try:
+                # Find the comments file for this subreddit (case-sensitive)
+                subreddit_dir = ServerConfig.SUBREDDITS_DIR / subreddit
+                if not subreddit_dir.exists():
+                    continue
+
+                # Look for comments file
+                comments_file = subreddit_dir / f"{subreddit}.comments.jsonl"
+                if not comments_file.exists():
+                    print(f"WARNING: Comments file not found for r/{subreddit}")
+                    continue
+
+                # Read and filter comments
+                with open(comments_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            comment = json.loads(line)
+                            # Extract post ID from link_id (format: "t3_<post_id>")
+                            link_id = comment.get("link_id", "")
+                            if link_id.startswith("t3_"):
+                                post_id = link_id[3:]  # Remove "t3_" prefix
+                                if post_id in comments_by_post:
+                                    # Add relevant comment data
+                                    comments_by_post[post_id].append({
+                                        "id": comment.get("id", ""),
+                                        "author": comment.get("author", ""),
+                                        "body": comment.get("body", ""),
+                                        "score": comment.get("score", 0),
+                                        "created_utc": comment.get("created_utc", 0)
+                                    })
+                        except json.JSONDecodeError:
+                            continue
+
+            except Exception as e:
+                print(f"ERROR: Failed to load comments from r/{subreddit}: {e}")
+                continue
+
+        return comments_by_post
+
+
+# ============================================================================
 # Response Formatting
 # ============================================================================
 
@@ -174,25 +226,36 @@ class ResponseFormatter:
     """Formats query results for HTTP responses."""
 
     @staticmethod
-    def format_posts(candidates: List[Candidate]) -> List[Dict[str, Any]]:
+    def format_posts(candidates: List[Candidate], subreddits: List[str]) -> List[Dict[str, Any]]:
         """
-        Format candidate posts for JSON response.
+        Format candidate posts for JSON response, including comments.
 
         Args:
             candidates: List of Candidate objects from retrieval
+            subreddits: List of subreddit names to load comments from
 
         Returns:
-            List of dictionaries with post metadata
+            List of dictionaries with post metadata and comments
         """
+        # Extract post IDs from candidates
+        post_ids = [candidate.chunk.doc_id for candidate in candidates]
+
+        # Load comments for all posts
+        comments_by_post = CommentLoader.load_comments_for_posts(post_ids, subreddits)
+
+        # Format posts with comments
         posts = []
         for candidate in candidates:
+            post_id = candidate.chunk.doc_id
             posts.append({
                 "title": candidate.chunk.title,
                 "source": candidate.chunk.source,
                 "text": candidate.chunk.text,
                 "score": candidate.score,
                 "chunk_id": candidate.chunk.id,
-                "section": candidate.chunk.section
+                "section": candidate.chunk.section,
+                "post_id": post_id,
+                "comments": comments_by_post.get(post_id, [])
             })
         return posts
 
@@ -221,16 +284,55 @@ class ResponseFormatter:
         if response["status"] != "success":
             return
 
-        print("\n=== AI SUMMARY ===")
+        # Print AI Summary
+        print("\n" + "="*80)
+        print("AI SUMMARY".center(80))
+        print("="*80)
         print(response["answer"])
-        print("\n=== TOP POSTS ===")
+        print("="*80)
+
+        # Print statistics
+        print(f"\nTotal candidates retrieved: {response.get('total_candidates', 'N/A')}")
+        print(f"Top posts displayed: {response.get('top_k', len(response['posts']))}")
+
+        # Print posts
+        print("\n" + "="*80)
+        print("TOP RELEVANT POSTS".center(80))
+        print("="*80)
 
         for i, post in enumerate(response["posts"], 1):
-            print(f"\n{i}. {post['title']} (score: {post['score']:.4f})")
-            print(f"   Source: {post['source']}")
-            print(f"   Text preview: {post['text'][:200]}...")
+            print(f"\n{'─'*80}")
+            print(f"POST #{i}")
+            print(f"{'─'*80}")
+            print(f"Title:      {post['title']}")
+            print(f"Source:     {post['source']}")
+            print(f"Score:      {post['score']:.4f}")
+            print(f"Section:    {post.get('section', 'N/A')}")
+            print(f"Chunk ID:   {post.get('chunk_id', 'N/A')}")
+            print(f"Post ID:    {post.get('post_id', 'N/A')}")
+            print(f"Comments:   {len(post.get('comments', []))} comments")
+            print(f"\nFull Text:\n{'-'*80}")
+            print(post['text'])
+            print(f"{'-'*80}")
 
-        print("\n" + "="*50 + "\n")
+            # Print comments if available
+            comments = post.get('comments', [])
+            if comments:
+                print(f"\nComments ({len(comments)}):")
+                print(f"{'─'*80}")
+                for j, comment in enumerate(comments[:5], 1):  # Show first 5 comments
+                    print(f"\n  Comment #{j} by {comment.get('author', 'Unknown')} (score: {comment.get('score', 0)})")
+                    print(f"  {'-'*76}")
+                    comment_body = comment.get('body', '')
+                    # Truncate long comments for readability
+                    if len(comment_body) > 200:
+                        comment_body = comment_body[:200] + "..."
+                    print(f"  {comment_body}")
+                if len(comments) > 5:
+                    print(f"\n  ... and {len(comments) - 5} more comments")
+                print(f"{'─'*80}")
+
+        print("\n" + "="*80 + "\n")
 
 
 # ============================================================================
