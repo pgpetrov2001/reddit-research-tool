@@ -87,3 +87,36 @@ def maybe_xai_keywords(user_query: str) -> Optional[str]:
         return None
 
 
+def maybe_xai_topic(question: str) -> Optional[str]:
+    """Extract a single-word topic from a question using AI.
+
+    Args:
+        question: The question to extract a topic from.
+
+    Returns:
+        A single-word topic string, or None if the API key is missing or an error occurs.
+    """
+    if not XAI_API_KEY:
+        return None
+    if not question or not question.strip():
+        return None
+    try:
+        client = _xai_client()
+        messages = [
+            {"role": "system", "content": (
+                "You are a topic classifier. Given a question, respond with exactly ONE word "
+                "that best represents the main topic. Output only the single word, nothing else. "
+                "Examples: technology, health, finance, sports, politics, science, entertainment."
+            )},
+            {"role": "user", "content": question}
+        ]
+        resp = client.chat.completions.create(model=XAI_CHAT_MODEL, messages=messages, temperature=0.0)
+        topic = resp.choices[0].message.content.strip().lower()
+        # Ensure we only return a single word
+        if " " in topic:
+            topic = topic.split()[0]
+        return topic
+    except Exception:
+        return None
+
+
