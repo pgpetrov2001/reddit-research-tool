@@ -297,7 +297,6 @@ class ResponseFormatter:
         posts = []
         for candidate in candidates:
             post_id = candidate.chunk.doc_id
-            link = ResponseFormatter._generate_reddit_link(candidate)
             posts.append({
                 "title": candidate.chunk.title,
                 "source": candidate.chunk.source,
@@ -306,7 +305,8 @@ class ResponseFormatter:
                 "chunk_id": candidate.chunk.id,
                 "section": candidate.chunk.section,
                 "post_id": post_id,
-                "link": link,
+                "link": candidate.chunk.source,
+                "author": candidate.chunk.author,
                 "comments": comments_by_post.get(post_id, [])
             })
         return posts

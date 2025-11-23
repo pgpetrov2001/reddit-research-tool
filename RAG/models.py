@@ -12,6 +12,7 @@ class Chunk:
     section: Optional[str]
     text: str
     updated_at: Optional[str]
+    author: Optional[str] = None
 
 
 @dataclass
