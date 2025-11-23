@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from RAG.retrievers import VectorRetriever
 from RAG.pipeline import build_context, SYSTEM_PROMPT
-from RAG.ai import maybe_xai_answer
+from RAG.ai import maybe_xai_answer, maybe_xai_topic
 from RAG.models import Candidate
 
 
@@ -134,6 +134,11 @@ class QueryProcessor:
         # Select the top k candidates by score
         best_candidates = sorted(candidates, key=lambda x: -x.score)[:k]
 
+        # Classify the topic of the question
+        topic = maybe_xai_topic(question)
+        if topic:
+            print(f"Question topic classified as: {topic}")
+
         # Generate AI answer using the retrieved context
         context = build_context(best_candidates)
         answer = maybe_xai_answer(SYSTEM_PROMPT, question, context)
@@ -149,7 +154,8 @@ class QueryProcessor:
             "answer": answer,
             "posts": posts,
             "total_candidates": len(candidates),
-            "top_k": k
+            "top_k": k,
+            "topic": topic
         }
 
 
@@ -226,6 +232,50 @@ class ResponseFormatter:
     """Formats query results for HTTP responses."""
 
     @staticmethod
+    def _generate_reddit_link(candidate: Candidate) -> Optional[str]:
+        """
+        Generate a Reddit link for a post candidate.
+
+        Args:
+            candidate: The Candidate object containing post data
+
+        Returns:
+            Reddit URL string, or None if link cannot be generated
+        """
+        source = candidate.chunk.source
+        post_id = candidate.chunk.doc_id
+        section = candidate.chunk.section or ""
+
+        # If source is already an HTTP URL, use it directly
+        if source and source.startswith("http"):
+            return source
+
+        # Extract subreddit from section (format: "r/subreddit" or "r/subreddit [flair]")
+        subreddit = None
+        if section.startswith("r/"):
+            # Remove "r/" prefix and extract subreddit name (stop at space or bracket)
+            subreddit_part = section[2:]  # Remove "r/"
+            # Find first space or bracket to get just the subreddit name
+            for delimiter in [" ", "[", "("]:
+                if delimiter in subreddit_part:
+                    subreddit_part = subreddit_part.split(delimiter)[0]
+            subreddit = subreddit_part.strip()
+
+        # If we have both subreddit and post_id, construct the Reddit URL
+        if subreddit and post_id:
+            return f"https://www.reddit.com/r/{subreddit}/comments/{post_id}"
+
+        # Try to extract from source (format: "reddit://subreddit/post_id")
+        if source and source.startswith("reddit://"):
+            parts = source.replace("reddit://", "").split("/")
+            if len(parts) >= 2:
+                subreddit = parts[0]
+                post_id = parts[1]
+                return f"https://www.reddit.com/r/{subreddit}/comments/{post_id}"
+
+        return None
+
+    @staticmethod
     def format_posts(candidates: List[Candidate], subreddits: List[str]) -> List[Dict[str, Any]]:
         """
         Format candidate posts for JSON response, including comments.
@@ -247,6 +297,7 @@ class ResponseFormatter:
         posts = []
         for candidate in candidates:
             post_id = candidate.chunk.doc_id
+            link = ResponseFormatter._generate_reddit_link(candidate)
             posts.append({
                 "title": candidate.chunk.title,
                 "source": candidate.chunk.source,
@@ -255,6 +306,7 @@ class ResponseFormatter:
                 "chunk_id": candidate.chunk.id,
                 "section": candidate.chunk.section,
                 "post_id": post_id,
+                "link": link,
                 "comments": comments_by_post.get(post_id, [])
             })
         return posts
@@ -294,6 +346,8 @@ class ResponseFormatter:
         # Print statistics
         print(f"\nTotal candidates retrieved: {response.get('total_candidates', 'N/A')}")
         print(f"Top posts displayed: {response.get('top_k', len(response['posts']))}")
+        if response.get('topic'):
+            print(f"Question topic: {response['topic']}")
 
         # Print posts
         print("\n" + "="*80)
@@ -310,6 +364,7 @@ class ResponseFormatter:
             print(f"Section:    {post.get('section', 'N/A')}")
             print(f"Chunk ID:   {post.get('chunk_id', 'N/A')}")
             print(f"Post ID:    {post.get('post_id', 'N/A')}")
+            print(f"Link:       {post.get('link', 'N/A')}")
             print(f"Comments:   {len(post.get('comments', []))} comments")
             print(f"\nFull Text:\n{'-'*80}")
             print(post['text'])
