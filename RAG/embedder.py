@@ -14,8 +14,12 @@ import faiss
 import numpy as np
 from tqdm import tqdm
 
-from .ai import embed_texts as voyage_embed_texts
-from .models import Chunk
+try:
+    from RAG.ai import embed_texts as voyage_embed_texts
+    from RAG.models import Chunk
+except ModuleNotFoundError:
+    from ai import embed_texts as voyage_embed_texts
+    from models import Chunk
 
 
 EMBED_BATCH = int(os.getenv("RAG_EMBED_BATCH", "64"))

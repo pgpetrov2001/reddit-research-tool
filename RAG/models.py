@@ -13,6 +13,7 @@ class Chunk:
     text: str
     updated_at: Optional[str]
     author: Optional[str] = None
+    post_id: Optional[str] = None  # For comments: the post ID they belong to
 
 
 @dataclass

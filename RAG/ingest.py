@@ -2,7 +2,11 @@ from __future__ import annotations
 import json, os, time
 from typing import List, Optional, Tuple
 from dataclasses import dataclass
-from .models import Chunk
+
+try:
+    from RAG.models import Chunk
+except ModuleNotFoundError:
+    from models import Chunk
 
 
 def _try_parse_json_line(line: str) -> Optional[dict]:
@@ -45,6 +49,7 @@ def ingest_posts_jsonl(posts_path: str) -> List[Chunk]:
             url = (obj.get("url") or "").strip()
             subreddit = (obj.get("subreddit") or "").strip()
             flair = (obj.get("link_flair_text") or "").strip()
+            author = (obj.get("author") or "").strip()
             section = (f"r/{subreddit} [{flair}]" if flair else f"r/{subreddit}").strip() or "post"
             created = obj.get("created_utc")
             try:
@@ -64,7 +69,8 @@ def ingest_posts_jsonl(posts_path: str) -> List[Chunk]:
                 source=source,
                 section=section,
                 text=body,
-                updated_at=updated_at
+                updated_at=updated_at,
+                author=author if author else None
             ))
     return chunks
 
@@ -81,6 +87,10 @@ def ingest_comments_jsonl(comments_path: str) -> List[Chunk]:
             if not body:
                 continue
             subreddit = (obj.get("subreddit") or "").strip()
+            author = (obj.get("author") or "").strip()
+            link_id_raw = (obj.get("link_id") or "").strip()
+            # Remove Reddit's "t3_" prefix from link_id to get the post ID
+            post_id = link_id_raw.replace("t3_", "") if link_id_raw.startswith("t3_") else link_id_raw
             section = f"r/{subreddit} comment".strip() or "comment"
             created = obj.get("created_utc")
             try:
@@ -101,7 +111,9 @@ def ingest_comments_jsonl(comments_path: str) -> List[Chunk]:
                 source=source,
                 section=section,
                 text=body,
-                updated_at=updated_at
+                updated_at=updated_at,
+                author=author if author else None,
+                post_id=post_id if post_id else None
             ))
     return chunks
 

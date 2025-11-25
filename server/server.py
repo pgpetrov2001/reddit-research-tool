@@ -212,7 +212,8 @@ class CommentLoader:
                                         "author": comment.get("author", ""),
                                         "body": comment.get("body", ""),
                                         "score": comment.get("score", 0),
-                                        "created_utc": comment.get("created_utc", 0)
+                                        "created_utc": comment.get("created_utc", 0),
+                                        "parent_id": comment.get("parent_id", "")
                                     })
                         except json.JSONDecodeError:
                             continue
@@ -222,6 +223,74 @@ class CommentLoader:
                 continue
 
         return comments_by_post
+
+    @staticmethod
+    def build_comment_tree(comments: List[Dict[str, Any]], post_id: str) -> List[Dict[str, Any]]:
+        """
+        Build a hierarchical comment tree from a flat list of comments.
+
+        Args:
+            comments: Flat list of comment dictionaries with parent_id fields
+            post_id: The post ID (without t3_ prefix) to identify top-level comments
+
+        Returns:
+            List of top-level comments, each with a 'replies' array containing nested comments
+        """
+        if not comments:
+            return []
+
+        # Create a dictionary to quickly look up comments by their ID
+        comments_by_id: Dict[str, Dict[str, Any]] = {}
+        for comment in comments:
+            comment_id = comment.get("id", "")
+            if comment_id:
+                # Add a 'replies' array to each comment
+                comment["replies"] = []
+                comments_by_id[comment_id] = comment
+
+        # Build the tree by linking children to parents
+        top_level_comments: List[Dict[str, Any]] = []
+
+        for comment in comments:
+            parent_id = comment.get("parent_id", "")
+
+            if not parent_id:
+                # No parent_id, treat as top-level
+                top_level_comments.append(comment)
+            elif parent_id.startswith("t3_"):
+                # Parent is the post itself (t3_ prefix), so this is a top-level comment
+                top_level_comments.append(comment)
+            elif parent_id.startswith("t1_"):
+                # Parent is another comment (t1_ prefix)
+                parent_comment_id = parent_id[3:]  # Remove "t1_" prefix
+                parent_comment = comments_by_id.get(parent_comment_id)
+                if parent_comment:
+                    # Add this comment to the parent's replies
+                    parent_comment["replies"].append(comment)
+                else:
+                    # Parent comment not found (might be deleted or not in our dataset)
+                    # Treat as top-level comment
+                    top_level_comments.append(comment)
+            else:
+                # Unknown parent_id format, treat as top-level
+                top_level_comments.append(comment)
+
+        # Sort top-level comments by score (descending) then by created_utc (oldest first)
+        top_level_comments.sort(key=lambda c: (-c.get("score", 0), c.get("created_utc", 0)))
+
+        # Recursively sort replies within each comment
+        def sort_replies(comment: Dict[str, Any]) -> None:
+            """Recursively sort replies by score and timestamp."""
+            replies = comment.get("replies", [])
+            if replies:
+                replies.sort(key=lambda c: (-c.get("score", 0), c.get("created_utc", 0)))
+                for reply in replies:
+                    sort_replies(reply)
+
+        for comment in top_level_comments:
+            sort_replies(comment)
+
+        return top_level_comments
 
 
 # ============================================================================
@@ -293,10 +362,15 @@ class ResponseFormatter:
         # Load comments for all posts
         comments_by_post = CommentLoader.load_comments_for_posts(post_ids, subreddits)
 
-        # Format posts with comments
+        # Format posts with hierarchical comments
         posts = []
         for candidate in candidates:
             post_id = candidate.chunk.doc_id
+
+            # Get flat comments and build hierarchical tree
+            flat_comments = comments_by_post.get(post_id, [])
+            hierarchical_comments = CommentLoader.build_comment_tree(flat_comments, post_id)
+
             posts.append({
                 "title": candidate.chunk.title,
                 "source": candidate.chunk.source,
@@ -307,7 +381,7 @@ class ResponseFormatter:
                 "post_id": post_id,
                 "link": candidate.chunk.source,
                 "author": candidate.chunk.author,
-                "comments": comments_by_post.get(post_id, [])
+                "comments": hierarchical_comments
             })
         return posts
 
@@ -425,7 +499,16 @@ class RedditDataRequestHandler(BaseHTTPRequestHandler):
         self.send_response(status_code)
         self._set_cors_headers()
         self.end_headers()
-        self.wfile.write(json.dumps(data).encode())
+
+        # Print the complete JSON response being sent
+        json_response = json.dumps(data, indent=2)
+        print("\n" + "="*80)
+        print("COMPLETE JSON RESPONSE BEING SENT".center(80))
+        print("="*80)
+        print(json_response)
+        print("="*80 + "\n")
+
+        self.wfile.write(json_response.encode())
 
     def do_OPTIONS(self) -> None:
         """
