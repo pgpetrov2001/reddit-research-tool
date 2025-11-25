@@ -315,10 +315,6 @@ class ResponseFormatter:
         post_id = candidate.chunk.doc_id
         section = candidate.chunk.section or ""
 
-        # If source is already an HTTP URL, use it directly
-        if source and source.startswith("http"):
-            return source
-
         # Extract subreddit from section (format: "r/subreddit" or "r/subreddit [flair]")
         subreddit = None
         if section.startswith("r/"):
@@ -371,6 +367,9 @@ class ResponseFormatter:
             flat_comments = comments_by_post.get(post_id, [])
             hierarchical_comments = CommentLoader.build_comment_tree(flat_comments, post_id)
 
+            # Generate Reddit link from post ID and subreddit info
+            reddit_link = ResponseFormatter._generate_reddit_link(candidate)
+
             posts.append({
                 "title": candidate.chunk.title,
                 "source": candidate.chunk.source,
@@ -379,7 +378,7 @@ class ResponseFormatter:
                 "chunk_id": candidate.chunk.id,
                 "section": candidate.chunk.section,
                 "post_id": post_id,
-                "link": candidate.chunk.source,
+                "link": reddit_link,
                 "author": candidate.chunk.author,
                 "comments": hierarchical_comments
             })
