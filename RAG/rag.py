@@ -46,10 +46,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-from models import Chunk
-from ingest import ingest_posts_jsonl, ingest_comments_jsonl
-from pipeline import Pipeline
-from embedder import build_embedding_index
+# Try absolute imports first, fall back to relative imports
+try:
+    from RAG.models import Chunk
+    from RAG.ingest import ingest_posts_jsonl, ingest_comments_jsonl
+    from RAG.pipeline import Pipeline
+    from RAG.embedder import build_embedding_index
+except ModuleNotFoundError:
+    from models import Chunk
+    from ingest import ingest_posts_jsonl, ingest_comments_jsonl
+    from pipeline import Pipeline
+    from embedder import build_embedding_index
 
 
 # --------------------- Utils ---------------------

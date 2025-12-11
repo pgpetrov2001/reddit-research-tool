@@ -5,7 +5,10 @@ from typing import Dict, List, Tuple
 
 import faiss
 
-from models import Chunk
+try:
+    from RAG.models import Chunk
+except ModuleNotFoundError:
+    from models import Chunk
 
 
 class VectorStore:
