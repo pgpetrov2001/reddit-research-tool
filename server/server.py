@@ -814,10 +814,10 @@ class AsyncResponseFormatter:
 
             # Get flat comments and build hierarchical tree
             flat_comments = comments_by_post.get(post_id, [])
-            hierarchical_comments = CommentLoader.build_comment_tree(flat_comments, post_id)
+            hierarchical_comments = AsyncCommentLoader.build_comment_tree(flat_comments, post_id)
 
             # Generate Reddit link from post ID and subreddit info
-            reddit_link = ResponseFormatter._generate_reddit_link(candidate)
+            reddit_link = AsyncResponseFormatter._generate_reddit_link(candidate)
 
             posts.append({
                 "title": candidate.chunk.title,
