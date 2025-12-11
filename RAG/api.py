@@ -3,7 +3,10 @@ from typing import Dict, Optional
 
 from fastapi import FastAPI
 
-from .rag import Pipeline  # reuse the Pipeline; if desired, can be split too
+try:
+    from RAG.rag import Pipeline  # reuse the Pipeline; if desired, can be split too
+except ModuleNotFoundError:
+    from rag import Pipeline
 
 
 app = FastAPI(title="RAG (Voyage embeddings + Keyword BM25, optional xAI chat)")

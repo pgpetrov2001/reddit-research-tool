@@ -14,8 +14,12 @@ import faiss
 import numpy as np
 from tqdm import tqdm
 
-from .ai import embed_texts as voyage_embed_texts
-from .models import Chunk
+try:
+    from RAG.ai import embed_texts as voyage_embed_texts
+    from RAG.models import Chunk
+except ModuleNotFoundError:
+    from ai import embed_texts as voyage_embed_texts
+    from models import Chunk
 
 
 EMBED_BATCH = int(os.getenv("RAG_EMBED_BATCH", "64"))
@@ -289,12 +293,12 @@ def build_embedding_index(
             for idx, batch in enumerate(chunk_batches)
         }
 
-        with tqdm(total=len(new_chunks), desc="Embedding", unit="batch") as pbar:
+        with tqdm(total=len(new_chunks), desc="Embedding", unit="chunk") as pbar:
             for future in as_completed(futures):
                 idx, items, vectors = future.result()
                 queue_result(idx, items, vectors)
                 if vectors is not None:
-                    pbar.update(1)
+                    pbar.update(len(items))
 
     # Ensure all buffered state is persisted
     store.flush(force=True)
