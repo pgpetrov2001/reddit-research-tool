@@ -202,6 +202,10 @@ class QueryRequest(BaseModel):
         ...,
         description="Question to answer (as string or object with 'title'/'description' fields)"
     )
+    is_paid: bool = Field(
+        default=True,
+        description="Whether the user has paid access (affects AI summary generation)"
+    )
 
     def get_subreddit_names(self) -> List[str]:
         """Extract subreddit names from flexible input format."""
@@ -406,7 +410,7 @@ class AsyncQueryProcessor:
     """
 
     @staticmethod
-    async def process_query(subreddits: List[str], question: str, k: int = ServerConfig.DEFAULT_TOP_K) -> Dict[str, Any]:
+    async def process_query(subreddits: List[str], question: str, k: int = ServerConfig.DEFAULT_TOP_K, is_paid: bool = True) -> Dict[str, Any]:
         """
         ASYNC version of process_query - processes query across multiple subreddits.
 
@@ -423,6 +427,7 @@ class AsyncQueryProcessor:
             subreddits: List of subreddit names to search
             question: The user's question
             k: Number of top results to return
+            is_paid: Whether the user has paid access (affects AI summary)
 
         Returns:
             Dictionary containing status, answer, posts, etc.
@@ -501,28 +506,34 @@ class AsyncQueryProcessor:
         # Old: answer = maybe_xai_answer(...) - blocks for 2-10 seconds
         # New: answer = await async_xai_answer(...) - doesn't block event loop
         # This is the MOST CRITICAL change - AI generation is the slowest operation
-        context = build_context(best_candidates)
 
-        # DEBUG: Print context being used
-        print(f"\n{'='*80}")
-        print(f"DEBUG: Context built for AI (length: {len(context)} chars)")
-        print(f"{'='*80}")
-        print(context[:500] + "..." if len(context) > 500 else context)
-        print(f"{'='*80}\n")
+        # Check if user has paid access
+        if not is_paid:
+            print("DEBUG: is_paid is False - returning empty AI summary")
+            answer = ""
+        else:
+            context = build_context(best_candidates)
 
-        try:
-            print("DEBUG: Calling async_xai_answer...")
-            answer = await async_xai_answer(SYSTEM_PROMPT, question, context)
-            if not answer:
-                print("DEBUG: async_xai_answer returned None, using fallback answer")
+            # DEBUG: Print context being used
+            print(f"\n{'='*80}")
+            print(f"DEBUG: Context built for AI (length: {len(context)} chars)")
+            print(f"{'='*80}")
+            print(context[:500] + "..." if len(context) > 500 else context)
+            print(f"{'='*80}\n")
+
+            try:
+                print("DEBUG: Calling async_xai_answer...")
+                answer = await async_xai_answer(SYSTEM_PROMPT, question, context)
+                if not answer:
+                    print("DEBUG: async_xai_answer returned None, using fallback answer")
+                    answer = "AI summary could not be generated at this time. Please check the relevant posts below for information."
+                else:
+                    print(f"DEBUG: Got answer from AI (length: {len(answer)} chars)")
+            except Exception as e:
+                print(f"WARNING: AI answer generation raised exception: {e}")
                 answer = "AI summary could not be generated at this time. Please check the relevant posts below for information."
-            else:
-                print(f"DEBUG: Got answer from AI (length: {len(answer)} chars)")
-        except Exception as e:
-            print(f"WARNING: AI answer generation raised exception: {e}")
-            answer = "AI summary could not be generated at this time. Please check the relevant posts below for information."
 
-        print(f"\nDEBUG: Final answer: {answer[:200]}..." if len(answer) > 200 else f"\nDEBUG: Final answer: {answer}")
+            print(f"\nDEBUG: Final answer: {answer[:200]}..." if len(answer) > 200 else f"\nDEBUG: Final answer: {answer}")
 
         # ARCHITECTURAL CHANGE: Load comments asynchronously (non-blocking file I/O)
         # Old: posts = ResponseFormatter.format_posts(...) - blocks on file reading
@@ -968,6 +979,7 @@ async def query(request: QueryRequest):
         print("\n--- Request Received ---")
         print(f"Subreddits: {subreddits}")
         print(f"Question: {question}")
+        print(f"is_paid: {request.is_paid}")
         print("------------------------\n")
 
         # Validate inputs (FastAPI already ensures non-empty, but let's double-check)
@@ -994,7 +1006,8 @@ async def query(request: QueryRequest):
         response = await AsyncQueryProcessor.process_query(
             subreddits=subreddits,
             question=question,
-            k=ServerConfig.DEFAULT_TOP_K
+            k=ServerConfig.DEFAULT_TOP_K,
+            is_paid=request.is_paid
         )
 
         # Check if query processing returned an error
