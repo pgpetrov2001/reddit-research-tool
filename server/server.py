@@ -78,6 +78,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Union
 import sys
 import os
+import subprocess
 
 # Add parent directory to path to import RAG modules
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -90,6 +91,10 @@ from RAG.models import Candidate
 from openai import AsyncOpenAI
 import voyageai as voi
 from dotenv import load_dotenv
+
+# Import for scraping and embedding
+from RAG.ingest import ingest_posts_jsonl, ingest_comments_jsonl
+from RAG.embedder import build_embedding_index
 
 load_dotenv()
 
@@ -137,6 +142,163 @@ class ServerConfig:
         """
         exact_path = cls.SUBREDDITS_DIR / subreddit / f"{subreddit}_RAG_store"
         return str(exact_path)
+
+
+# ============================================================================
+# Subreddit Scraping and Embedding Helper Functions
+# ============================================================================
+
+def check_subreddit_exists(subreddit: str) -> bool:
+    """
+    Check if a subreddit folder exists in SubReddits directory.
+
+    Args:
+        subreddit: Name of the subreddit
+
+    Returns:
+        True if the subreddit folder exists, False otherwise
+    """
+    subreddit_dir = ServerConfig.SUBREDDITS_DIR / subreddit
+    return subreddit_dir.exists() and subreddit_dir.is_dir()
+
+
+async def scrape_and_embed_subreddit(subreddit: str) -> None:
+    """
+    Scrape and embed a subreddit synchronously (user waits for completion).
+
+    This function:
+    1. Creates the subreddit directory
+    2. Downloads posts and comments using Arctic Shift API
+    3. Ingests the JSONL files and creates chunks
+    4. Builds embeddings and FAISS index
+
+    Args:
+        subreddit: Name of the subreddit to scrape and embed
+
+    Raises:
+        Exception: If scraping or embedding fails
+    """
+    print(f"\n{'='*80}")
+    print(f"Scraping and embedding subreddit: r/{subreddit}")
+    print(f"{'='*80}\n")
+
+    subreddit_dir = ServerConfig.SUBREDDITS_DIR / subreddit
+    subreddit_dir.mkdir(parents=True, exist_ok=True)
+
+    # Paths for output files
+    posts_file = subreddit_dir / f"{subreddit}.posts.jsonl"
+    comments_file = subreddit_dir / f"{subreddit}.comments.jsonl"
+    rag_store_dir = subreddit_dir / f"{subreddit}_RAG_store"
+
+    try:
+        # Step 1: Scrape posts and comments
+        print(f"[{subreddit}] Step 1/3: Downloading posts and comments from Reddit API...")
+
+        # Run scraping in thread executor to avoid blocking event loop
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _scrape_subreddit_sync, subreddit, subreddit_dir)
+
+        print(f"[{subreddit}] ✓ Downloaded posts and comments")
+
+        # Step 2: Ingest and create chunks
+        print(f"[{subreddit}] Step 2/3: Ingesting posts and comments...")
+        chunks = await loop.run_in_executor(None, _ingest_subreddit_sync, posts_file, comments_file)
+
+        if not chunks:
+            raise RuntimeError(f"No chunks created from subreddit r/{subreddit}")
+
+        print(f"[{subreddit}] ✓ Created {len(chunks)} chunks")
+
+        # Step 3: Build embeddings
+        print(f"[{subreddit}] Step 3/3: Building embeddings (this may take a while)...")
+        stats = await loop.run_in_executor(
+            None,
+            build_embedding_index,
+            chunks,
+            str(rag_store_dir)
+        )
+
+        print(f"[{subreddit}] ✓ Embeddings created:")
+        print(f"  - Parsed: {stats.get('parsed', 0)}")
+        print(f"  - New embeddings: {stats.get('new_embeddings', 0)}")
+        print(f"  - New metadata: {stats.get('new_meta', 0)}")
+        print(f"  - Skipped existing: {stats.get('skipped_existing', 0)}")
+        print(f"  - Failed batches: {stats.get('failed_batches', 0)}")
+
+        print(f"\n{'='*80}")
+        print(f"✓ Successfully scraped and embedded r/{subreddit}")
+        print(f"{'='*80}\n")
+
+    except Exception as e:
+        print(f"\n{'='*80}")
+        print(f"✗ Failed to scrape and embed r/{subreddit}: {e}")
+        print(f"{'='*80}\n")
+        raise
+
+
+def _scrape_subreddit_sync(subreddit: str, output_dir: Path) -> None:
+    """
+    Synchronous helper to scrape a subreddit (runs in executor).
+    Downloads all posts and comments using Arctic Shift API.
+
+    Args:
+        subreddit: Name of the subreddit
+        output_dir: Directory to save JSONL files
+    """
+    # Use Call_API.py to download posts and comments
+    # This will download all available data (no time restrictions)
+    call_api_path = ServerConfig.PROJECT_ROOT / "Call_API.py"
+
+    if not call_api_path.exists():
+        raise RuntimeError(f"Call_API.py not found at {call_api_path}")
+
+    # Run the Call_API.py script with appropriate arguments
+    # Download both posts and comments
+    cmd = [
+        sys.executable,
+        str(call_api_path),
+        "-s", subreddit,
+        "--what", "both",
+        "--outdir", str(output_dir),
+        "--workers", "4"  # Use 4 workers for parallel download
+    ]
+
+    print(f"[{subreddit}] Running: {' '.join(cmd)}")
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)  # 1 hour timeout
+
+    if result.returncode != 0:
+        print(f"[{subreddit}] STDOUT: {result.stdout}")
+        print(f"[{subreddit}] STDERR: {result.stderr}")
+        raise RuntimeError(f"Failed to scrape r/{subreddit}: {result.stderr}")
+
+    print(f"[{subreddit}] Scraping output: {result.stdout}")
+
+
+def _ingest_subreddit_sync(posts_file: Path, comments_file: Path) -> List:
+    """
+    Synchronous helper to ingest posts and comments (runs in executor).
+
+    Args:
+        posts_file: Path to posts JSONL file
+        comments_file: Path to comments JSONL file
+
+    Returns:
+        List of Chunk objects
+    """
+    from RAG.models import Chunk
+
+    chunks = []
+
+    if posts_file.exists():
+        print(f"  Ingesting posts from {posts_file}...")
+        chunks.extend(ingest_posts_jsonl(str(posts_file)))
+
+    if comments_file.exists():
+        print(f"  Ingesting comments from {comments_file}...")
+        chunks.extend(ingest_comments_jsonl(str(comments_file)))
+
+    return chunks
 
 
 # ============================================================================
@@ -1065,6 +1227,65 @@ async def query(request: QueryRequest):
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No question provided"
             )
+
+        # Check subreddit availability and scrape/embed if needed
+        print(f"\nChecking subreddit availability...")
+        missing_subreddits = []
+        for subreddit in subreddits:
+            if not check_subreddit_exists(subreddit):
+                missing_subreddits.append(subreddit)
+                print(f"  ✗ r/{subreddit} - NOT FOUND")
+            else:
+                print(f"  ✓ r/{subreddit} - Available")
+
+        # Handle missing subreddits based on user type
+        if missing_subreddits:
+            if not request.is_paid:
+                # Free users: return error for missing subreddits
+                error_msg = (
+                    f"The following subreddit(s) have not been scraped yet: {', '.join(missing_subreddits)}. "
+                    f"Only paid users can automatically scrape new subreddits."
+                )
+                print(f"\n✗ FREE USER ERROR: {error_msg}\n")
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=error_msg
+                )
+            else:
+                # Paid users: scrape and embed missing subreddits
+                print(f"\n{'='*80}")
+                print(f"PAID USER: Auto-scraping {len(missing_subreddits)} missing subreddit(s)")
+                print(f"{'='*80}\n")
+
+                failed_subreddits = []
+                for subreddit in missing_subreddits:
+                    try:
+                        await scrape_and_embed_subreddit(subreddit)
+                    except Exception as e:
+                        error_msg = f"Failed to scrape and embed r/{subreddit}: {str(e)}"
+                        print(f"\n✗ {error_msg}\n")
+                        failed_subreddits.append(subreddit)
+
+                # If any subreddits failed, remove them from the query list
+                if failed_subreddits:
+                    print(f"\n{'='*80}")
+                    print(f"WARNING: {len(failed_subreddits)} subreddit(s) failed to scrape/embed")
+                    print(f"Failed: {', '.join(failed_subreddits)}")
+                    print(f"{'='*80}\n")
+
+                    # Remove failed subreddits from the list
+                    subreddits = [s for s in subreddits if s not in failed_subreddits]
+
+                    # If all subreddits failed, return error
+                    if not subreddits:
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail=f"All subreddits failed to scrape/embed: {', '.join(failed_subreddits)}"
+                        )
+
+                print(f"\n{'='*80}")
+                print(f"✓ All required subreddits are now available")
+                print(f"{'='*80}\n")
 
         # Log query details
         print(f"\nProcessing query: '{question}'")
