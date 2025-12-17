@@ -239,31 +239,38 @@ async def scrape_and_embed_subreddit(subreddit: str) -> None:
 def _scrape_subreddit_sync(subreddit: str, output_dir: Path) -> None:
     """
     Synchronous helper to scrape a subreddit (runs in executor).
-    Downloads all posts and comments using Arctic Shift API.
+    Downloads posts and comments from the past 1 year using Arctic Shift API.
 
     Args:
         subreddit: Name of the subreddit
         output_dir: Directory to save JSONL files
     """
     # Use Call_API.py to download posts and comments
-    # This will download all available data (no time restrictions)
+    # Limit to 1 year in the past
     call_api_path = ServerConfig.PROJECT_ROOT / "Call_API.py"
 
     if not call_api_path.exists():
         raise RuntimeError(f"Call_API.py not found at {call_api_path}")
 
+    # Calculate date from 1 year ago in ISO8601 format
+    from datetime import datetime, timedelta, timezone
+    one_year_ago = datetime.now(timezone.utc) - timedelta(days=365)
+    after_date = one_year_ago.strftime("%Y-%m-%dT%H:%M:%SZ")
+
     # Run the Call_API.py script with appropriate arguments
-    # Download both posts and comments
+    # Download both posts and comments from the past year
     cmd = [
         sys.executable,
         str(call_api_path),
         "-s", subreddit,
         "--what", "both",
+        "--after", after_date,  # Only scrape data from the past year
         "--outdir", str(output_dir),
-        "--workers", "4"  # Use 4 workers for parallel download
+        "--workers", "25"  # Use 25 workers for parallel download
     ]
 
     print(f"[{subreddit}] Running: {' '.join(cmd)}")
+    print(f"[{subreddit}] Scraping data from {after_date} onwards (past 1 year)")
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)  # 1 hour timeout
 
