@@ -26,6 +26,7 @@ class IntervalFetcher:
         worker_id: int,
         progress_cb: Callable[[int, int], None],
         completion_cb: Optional[Callable[[int], None]] = None,
+        initial_count_cb: Optional[Callable[[int, int], None]] = None,
     ) -> None:
         self.api = api
         self.kind = kind
@@ -35,7 +36,10 @@ class IntervalFetcher:
         self.worker_id = worker_id
         self.progress_cb = progress_cb
         self.completion_cb = completion_cb
+        self.initial_count_cb = initial_count_cb
         self.lock = threading.Lock()
+        self.total_written = 0
+        self.last_timestamp = None
 
     def run(self, interval: Tuple[Optional[str], Optional[str]], expected_total: Optional[int] = None) -> FetchResult:
         after, before = interval
@@ -48,37 +52,44 @@ class IntervalFetcher:
         path = self.out_dir / f"{slug}__{suffix}.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        written = self._resume_count(path)
-        total_written = written
+        self._try_resume(path)
+        if self.initial_count_cb:
+            self.initial_count_cb(self.worker_id, self.total_written)
         with path.open("a", encoding="utf-8") as handle:
-            total_written += self._fetch_interval(after, before, handle, total_written)
+            self._fetch_interval(after, before, handle)
         
         # Signal completion
         if self.completion_cb:
             self.completion_cb(self.worker_id)
         
-        return FetchResult(count=total_written, file_path=path)
+        return FetchResult(count=self.total_written, file_path=path)
 
-    def _resume_count(self, path: Path) -> int:
+    def _try_resume(self, path: Path):
         if not path.exists():
-            return 0
-        count = 0
+            return
+        self.total_written = 0
+        last_line = None
         with path.open("r", encoding="utf-8") as f:
             for line in f:
                 if line.strip():
-                    count += 1
-        return count
+                    self.total_written += 1
+                    last_line = line
+        if not last_line:
+            return
+        try:
+            row = json.loads(last_line)
+        except json.JSONDecodeError:
+            return
+        self.last_timestamp = normalize_created(row.get("created_utc"))
 
-    def _fetch_interval(self, after: Optional[str], before: Optional[str], handle, already_written: int) -> int:
+    def _fetch_interval(self, after: str, before: str, handle) -> int:
         total_new = 0
-        current_after = after
-        if already_written > 0:
-            current_after = self._resume_after(handle.name)
-        current_before = before
+        if self.last_timestamp is None:
+            self.last_timestamp = after
         while True:
-            if current_after and current_before and current_after >= current_before:
+            if self.last_timestamp >= before:
                 break
-            rows = self._fetch_once(current_after, current_before)
+            rows = self._fetch_once(self.last_timestamp, before)
             if not rows:
                 break
             rows.sort(key=lambda r: self._created_ts(r))
@@ -86,9 +97,9 @@ class IntervalFetcher:
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
             total_new += len(rows)
             self.progress_cb(self.worker_id, len(rows))
-            current_after = normalize_created(rows[-1].get("created_utc"))
-            if current_after is None:
-                break
+            self.last_timestamp = normalize_created(rows[-1].get("created_utc"))
+            if self.last_timestamp is None:
+                raise RuntimeError(f"Encountered empty 'created_utc' timestamp on fetched {self.kind} while fetching interval [{after}, {before}) in worker {self.worker_id}")
         return total_new
 
     def _fetch_once(self, after: Optional[str], before: Optional[str]) -> List[Dict[str, Any]]:
@@ -112,19 +123,4 @@ class IntervalFetcher:
                 return float(created)
             return parse_iso_ts(created).timestamp()
         raise ValueError("missing created_utc")
-
-    def _resume_after(self, path_name: str) -> Optional[str]:
-        last_line = None
-        with open(path_name, "r", encoding="utf-8") as reader:
-            for line in reader:
-                line = line.strip()
-                if line:
-                    last_line = line
-        if not last_line:
-            return None
-        try:
-            row = json.loads(last_line)
-        except json.JSONDecodeError:
-            return None
-        return normalize_created(row.get("created_utc"))
 

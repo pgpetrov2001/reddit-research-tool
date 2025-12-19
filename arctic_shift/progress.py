@@ -12,15 +12,26 @@ if TYPE_CHECKING:
 
 
 class ProgressTracker:
-    def __init__(self, label: str, plans: List[WorkerPlan], total: Optional[int] = None, initial_counts: Optional[Dict[int, int]] = None) -> None:
+    def __init__(
+        self,
+        label: str,
+        plans: List[WorkerPlan],
+        total: Optional[int] = None,
+        initial_counts: Optional[Dict[int, int]] = None,
+    ) -> None:
         self.label = label
         self.plans = plans
         self.total = total
-        self.counts: Dict[int, int] = initial_counts.copy() if initial_counts else {i: 0 for i in range(len(plans))}
-        self.initial_counts: Dict[int, int] = initial_counts.copy() if initial_counts else {i: 0 for i in range(len(plans))}
+        self.counts: Dict[int, int] = {i: 0 for i in range(len(plans))}
+        self.initial_counts: Dict[int, int] = {i: 0 for i in range(len(plans))}
+        if initial_counts:
+            for idx, count in initial_counts.items():
+                if 0 <= idx < len(plans):
+                    self._apply_initial_count(idx, count)
         self.start_time: float = time.time()
         self.worker_start_times: Dict[int, float] = {}  # Track when each worker first reports progress
         self.worker_completed: Dict[int, bool] = {i: False for i in range(len(plans))}  # Track completion status
+        self.worker_speed_snapshot: Dict[int, float] = {}  # Preserve last speed when worker finishes
         self.lock = threading.Lock()
         self._printed = False
         self._num_lines = 0  # Track how many lines we've printed
@@ -69,12 +80,30 @@ class ProgressTracker:
         """Mark a worker as completed."""
         with self.lock:
             worker_idx = worker_id - 1
+            current_time = time.time()
+            count = self.counts.get(worker_idx, 0)
+            initial_count = self.initial_counts.get(worker_idx, 0)
+            fetched_since_start = count - initial_count
+            self.worker_speed_snapshot[worker_idx] = self._get_worker_speed(worker_idx, fetched_since_start, current_time)
             self.worker_completed[worker_idx] = True
             self._print_progress()
 
     def print_initial(self) -> None:
         """Print initial progress state."""
         self._print_progress()
+
+    def _apply_initial_count(self, worker_idx: int, count: int) -> None:
+        self.counts[worker_idx] = count
+        self.initial_counts[worker_idx] = count
+
+    def set_initial_count(self, worker_id: int, count: int) -> None:
+        """Set resume count for a worker once it starts running."""
+        with self.lock:
+            worker_idx = worker_id - 1
+            if worker_idx < 0 or worker_idx >= len(self.plans):
+                return
+            self._apply_initial_count(worker_idx, count)
+            self._print_progress()
 
     def _make_progress_bar(self, current: int, total: Optional[int], width: int = 20, is_completed: bool = False) -> str:
         """Create a visual progress bar like [=====>    ]"""
@@ -184,7 +213,8 @@ class ProgressTracker:
             
             # Calculate speed
             speed = self._get_worker_speed(i, fetched_since_start, current_time)
-            speed_str = self._format_speed(speed)
+            display_speed = self.worker_speed_snapshot.get(i, speed) if is_completed else speed
+            speed_str = self._format_speed(display_speed)
             
             if expected is not None and expected > 0:
                 pct = (count / expected) * 100
@@ -263,27 +293,3 @@ class ProgressTracker:
             sys.stdout.flush()
         self._printed = False
         self._num_lines = 0
-
-
-def get_resume_counts(kind: str, out_dir: Path, plans: List["WorkerPlan"]) -> Dict[int, int]:
-    """Get resume counts for each worker by checking existing files."""
-    from .workers import worker_path_for
-    
-    counts: Dict[int, int] = {}
-    for idx, plan in enumerate(plans):
-        worker_id = idx + 1
-        path = worker_path_for(kind, out_dir, worker_id, plan.interval, plan.expected)
-        if path.exists():
-            count = 0
-            try:
-                with path.open("r", encoding="utf-8") as f:
-                    for line in f:
-                        if line.strip():
-                            count += 1
-            except OSError:
-                count = 0
-            counts[idx] = count
-        else:
-            counts[idx] = 0
-    return counts
-
