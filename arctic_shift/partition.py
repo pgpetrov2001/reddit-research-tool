@@ -81,6 +81,20 @@ def partitions_from_cuts(after: str, before: str, buckets: List[Tuple[str, int]]
     return partitions
 
 def intersect_histogram_with_range(after: str, before: str, histogram: Sequence[Tuple[str, int]], frequency: str) -> Sequence[Tuple[str, int]]:
+    """
+    Intersect a histogram with a time range, assuming the histogram bounds the smallest possible interval with frequency-aligned endpoints that contains the [after, before] range.
+    This consists of linearly interpolating between the bucket0timestamp to after to get an approximate count for the first bucket,
+    and similarly linearly interpolating between the bucket_last_timestamp to before to get an approximate count for the last bucket.
+    Returns the adjusted histogram.
+    Args:
+        after: Start of the time range (ISO format)
+        before: End of the time range (ISO format)
+        histogram: List of tuples (timestamp, count)
+        frequency: Frequency of the histogram
+    Returns:
+        List of tuples (timestamp, count)
+    """
+
     histogram = histogram[:]
 
     after_dt, before_dt = parse_iso_ts(after), parse_iso_ts(before)

@@ -15,7 +15,7 @@ from arctic_shift.workers import (
     worker_files_range_same,
     run_workers,
 )
-from arctic_shift.progress import ProgressTracker, get_resume_counts
+from arctic_shift.progress import ProgressTracker
 from arctic_shift.merge import merge_sorted_jsonl
 from arctic_shift.aggregation import ensure_histogram, FREQUENCY_ORDER
 
@@ -116,16 +116,27 @@ def download_kind(kind: str, api_factory, args) -> None:
     existing = discover_worker_files(worker_dir)
     print(f"[{kind}] Found {len(existing)} existing worker files", flush=True)
     
-    if args.workers > 0 and len(existing) == args.workers and worker_files_range_same(existing, args.after, args.before):
+    old_carryovers = list(worker_dir.glob("*_worker*__*.jsonl.old"))
+    carryover_manager = None
+    if not old_carryovers and args.workers > 0 and len(existing) == args.workers and worker_files_range_same(existing, args.after, args.before):
         print(f"[{kind}] Existing worker files match configuration, reusing partitions", flush=True)
         plans = [WorkerPlan(interval=(info[1], info[2]), expected=info[3]) for info in existing]
+        carryover_manager = None
     else:
         print(f"[{kind}] Computing new partitions...", flush=True)
         api = api_factory()
         cache_dir = base_dir
         plans = planned_partitions(api, cache_dir, kind, args.subreddit, args.after, args.before, args.workers, force_histogram=args.force_histogram)
         print(f"[{kind}] Preparing worker files (redistributing if needed)...", flush=True)
-        prepare_worker_files(kind, base_dir, plans, existing, subreddit=args.subreddit)
+        carryover_manager = prepare_worker_files(
+            kind=kind,
+            base_dir=base_dir,
+            plans=plans,
+            existing_files=existing,
+            overall_after=args.after,
+            overall_before=args.before,
+            subreddit=args.subreddit,
+        )
         print(f"[{kind}] Worker files prepared", flush=True)
 
     # Print partitions before starting workers
@@ -140,9 +151,7 @@ def download_kind(kind: str, api_factory, args) -> None:
         print(f"[{kind}] Total expected items: {total_estimate}", flush=True)
     print(f"[{kind}] Starting {len(plans)} worker(s)...", flush=True)
     
-    # Initialize progress with resume counts if files exist
-    initial_counts = get_resume_counts(kind, worker_dir, plans)
-    progress = ProgressTracker(kind, plans, total=total_estimate or None, initial_counts=initial_counts)
+    progress = ProgressTracker(kind, plans, total=total_estimate or None)
     # Print initial progress
     progress.print_initial()
     try:
@@ -155,6 +164,8 @@ def download_kind(kind: str, api_factory, args) -> None:
             plans=plans,
             progress_cb=progress.update,
             completion_cb=progress.mark_completed,
+            initial_count_cb=progress.set_initial_count,
+            carryover_manager=carryover_manager,
         )
     finally:
         progress.close()

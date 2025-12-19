@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import datetime as dt
-import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from .api import ArcticShiftAPI
+from .carryover import CarryoverManager, CarryoverSegment
 from .fetcher import FetchResult, IntervalFetcher
-from .tokens import normalize_created, parse_iso_ts, token_to_value, value_to_token
+from .tokens import parse_iso_ts, token_to_value, value_to_token
 
 
 @dataclass
@@ -72,159 +72,101 @@ def worker_files_range_same(
     return first_after == after and last_before == before
 
 
-def _locate_partition(ts: dt.datetime, boundaries: List[Tuple[Optional[dt.datetime], Optional[dt.datetime]]]) -> Optional[int]:
-    """Find the partition index for a timestamp, or None if outside all partitions."""
-    for idx, (start_dt, end_dt) in enumerate(boundaries):
-        if (start_dt is None or ts >= start_dt) and (end_dt is None or ts < end_dt):
-            return idx
-    
-    # Assign to first/last partition if unbounded
-    if boundaries:
-        if boundaries[0][0] is None:  # First has unbounded start
-            return 0
-        if boundaries[-1][1] is None:  # Last has unbounded end
-            return len(boundaries) - 1
-    return None
-
-
-def _read_and_classify_rows(
-    existing_files: Sequence[Path],
-    boundaries: List[Tuple[Optional[dt.datetime], Optional[dt.datetime]]],
-    num_partitions: int,
-) -> List[List[Tuple[str, dt.datetime]]]:
-    """
-    Read JSON objects from old worker files and distribute them into the new partitions.
-    
-    Returns a list where each element is a list of tuples: (json_line, timestamp).
-    json_line is the full JSON object as a string, timestamp is parsed for sorting.
-
-    Each list consists of all the elements from the old worker file that belong to the same partition.
-    """
-    partition_data: List[List[Tuple[str, dt.datetime]]] = [[] for _ in range(num_partitions)]
-    
-    for old_path in existing_files:
-        if not old_path.exists():
-            print(f"[WARNING] Worker file {old_path} which was detected a moment ago no longer exists")
-            continue
-        
-        try:
-            with old_path.open("r", encoding="utf-8") as reader:
-                for line_number, json_line in enumerate(reader, start=1):
-                    json_line = json_line.strip()
-                    if not json_line:
-                        continue
-                    
-                    try:
-                        # Parse JSON to extract created_utc timestamp for classification
-                        json_obj = json.loads(json_line)
-                        created_iso = normalize_created(json_obj.get("created_utc"))
-                        if not created_iso:
-                            raise ValueError(f"Missing or invalid created_utc timestamp")
-                        timestamp = parse_iso_ts(created_iso)
-                    except (json.JSONDecodeError, ValueError) as e:
-                        print(f"[WARNING] Invalid JSON line in existing worker file {old_path} on line {line_number}. Error: {e}. JSON line: {json_line}")
-                        continue
-                    
-                    # Classify this JSON object into the appropriate partition
-                    plan_idx = _locate_partition(timestamp, boundaries)
-                    if plan_idx is not None and plan_idx < num_partitions:
-                        # Store the original JSON line with its timestamp for sorting
-                        partition_data[plan_idx].append((json_line, timestamp))
-        except OSError as e:
-            print(f"[WARNING] Failed to read worker file {old_path}: {e}")
-    
-    return partition_data
-
-
-def _delete_existing_worker_files(existing_files: Sequence[Path]) -> List[Path]:
-    deleted = []
-    for path in existing_files:
-        try:
-            path.unlink()
-            deleted.append(path)
-        except OSError as e:
-            print(f"[WARNING] Failed to delete worker file {path}: {e}")
-    return deleted
-
-
-def _write_worker_files(target_paths: List[Path], partition_data: List[List[Tuple[str, dt.datetime]]]) -> None:
-    """
-    Sort JSON objects by timestamp and write them to their corresponding worker files.
-    
-    Each tuple contains (json_line, timestamp) where json_line is the full JSON object.
-    """
-    for path, json_objects in zip(target_paths, partition_data):
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Sort by timestamp to maintain chronological order
-        json_objects.sort(key=lambda x: x[1])
-
-        with tmp.open("w", encoding="utf-8") as handle:
-            for json_line, _ in json_objects:
-                handle.write(json_line + "\n")
-            handle.flush()
-        
-        if path.exists():
-            path.unlink()
-        tmp.replace(path)
-
-
 def prepare_worker_files(
     kind: str,
     base_dir: Path,
     plans: Sequence[WorkerPlan],
     existing_files: Sequence[Tuple[Path, Optional[str], Optional[str], Optional[int]]],
+    overall_after: Optional[str],
+    overall_before: Optional[str],
     subreddit: Optional[str] = None,
-) -> None:
+) -> CarryoverManager:
     """
-    Redistribute data from old worker files into new partition files.
-    
-    If no worker files exist but subreddit is provided, attempts to
-    read from the final output file ({subreddit}.{kind}.jsonl) and redistribute from there.
+    Prepare carryover metadata by renaming old worker files to *.jsonl.old and
+    recording which slices must be replayed for the new worker plans.
     """
+    manager = CarryoverManager()
     if not plans:
-        return
-    
+        return manager
+
     worker_dir = base_dir / f"{kind}_workers"
-    target_paths = [worker_path_for(kind, worker_dir, idx + 1, plan.interval, plan.expected) for idx, plan in enumerate(plans)]
-    
-    # Collect file paths to redistribute
-    file_paths: List[Path] = []
-    
-    # Extract paths from existing worker files
-    if existing_files:
-        file_paths = [path for path, *_ in existing_files]
-    # If no worker files, check for final output file
-    elif subreddit:
+    worker_dir.mkdir(parents=True, exist_ok=True)
+
+    # Rename existing worker files so they become .old carryover sources.
+    renamed_sources: List[Tuple[Path, Optional[str], Optional[str]]] = []
+    for path, start, end, _ in existing_files:
+        renamed = _ensure_old_suffix(path)
+        renamed_sources.append((renamed, start, end))
+
+    if not renamed_sources and subreddit:
         final_file = base_dir / f"{subreddit}.{kind}.jsonl"
         if final_file.exists():
-            file_paths = [final_file]
-        else:
-            # No files to redistribute, create empty worker files
-            for path in target_paths:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.touch(exist_ok=True)
-            return
+            renamed_sources.append(
+                (_ensure_old_suffix(final_file, copy_source=True), overall_after, overall_before)
+            )
+
+    if not renamed_sources:
+        return manager
+
+    for worker_id, plan in enumerate(plans, start=1):
+        plan_start, plan_end = plan.interval
+        for source_path, source_start, source_end in renamed_sources:
+            overlap_start = _later_start(plan_start, source_start)
+            overlap_end = _earlier_end(plan_end, source_end)
+            if _has_overlap(overlap_start, overlap_end):
+                segment = CarryoverSegment.from_bounds(
+                    worker_id=worker_id,
+                    source_path=source_path,
+                    start=overlap_start,
+                    end=overlap_end,
+                )
+                manager.add_segment(segment)
+
+    if any(manager.segments_for_worker(idx + 1) for idx in range(len(plans))):
+        sources = {path.name for path, *_ in renamed_sources}
+        print(f"[carryover] Prepared segments from {len(sources)} old file(s): {', '.join(sorted(sources))}")
     else:
-        # No files to redistribute, create empty worker files
-        for path in target_paths:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.touch(exist_ok=True)
-        return
-    
-    boundaries = [
-        (parse_iso_ts(start) if start else None, parse_iso_ts(end) if end else None)
-        for start, end in (plan.interval for plan in plans)
-    ]
-    print(f"Reading from {len(file_paths)} old files: {', '.join(path.name for path in file_paths)}")
-    partition_data = _read_and_classify_rows(file_paths, boundaries, len(plans))
-    nl = '\n'
-    print(f"Classified old rows for the new files: {nl.join(f'{path.name}: {len(data)} old rows' for path, data in zip(target_paths, partition_data))}")
-    _write_worker_files(target_paths, partition_data)
-    print(f"Wrote the {len(target_paths)} new worker files using the old data.")
-    deleted = _delete_existing_worker_files(set(file_paths) - set(target_paths)) # deletes old worker files
-    print(f"Deleted {len(deleted)} existing worker files: {', '.join(str(path) for path in deleted)}")
+        print("[carryover] No overlapping data found in old worker files.")
+
+    return manager
+
+
+def _ensure_old_suffix(path: Path, *, copy_source: bool = False) -> Path:
+    if path.suffix == ".old":
+        return path
+    old_path = path.with_suffix(path.suffix + ".old")
+    if old_path.exists():
+        return old_path
+    try:
+        if copy_source:
+            shutil.copy2(path, old_path)
+        else:
+            path.rename(old_path)
+    except FileNotFoundError:
+        pass
+    return old_path
+
+
+def _later_start(a: Optional[str], b: Optional[str]) -> Optional[str]:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return a if parse_iso_ts(a) >= parse_iso_ts(b) else b
+
+
+def _earlier_end(a: Optional[str], b: Optional[str]) -> Optional[str]:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return a if parse_iso_ts(a) <= parse_iso_ts(b) else b
+
+
+def _has_overlap(start: Optional[str], end: Optional[str]) -> bool:
+    if start is None or end is None:
+        return True
+    return parse_iso_ts(start) < parse_iso_ts(end)
 
 
 def run_workers(
@@ -237,6 +179,8 @@ def run_workers(
     plans: Sequence[WorkerPlan],
     progress_cb: Callable[[int, int], None],
     completion_cb: Optional[Callable[[int], None]] = None,
+    initial_count_cb: Optional[Callable[[int, int], None]] = None,
+    carryover_manager: Optional[CarryoverManager] = None,
 ) -> List[FetchResult]:
     results: List[FetchResult] = []
     with ThreadPoolExecutor(max_workers=len(plans) or 1) as executor:
@@ -252,6 +196,9 @@ def run_workers(
                 worker_id=idx,
                 progress_cb=progress_cb,
                 completion_cb=completion_cb,
+                initial_count_cb=initial_count_cb,
+                carryover_segments=carryover_manager.segments_for_worker(idx) if carryover_manager else None,
+                carryover_manager=carryover_manager,
             )
             futures.append(executor.submit(fetcher.run, plan.interval, plan.expected))
         for fut in as_completed(futures):
