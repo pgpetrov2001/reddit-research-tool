@@ -9,11 +9,11 @@ from rank_bm25 import BM25Okapi
 try:
     from RAG.models import Candidate
     from RAG.vector_store import VectorStore
-    from RAG.ai import embed_query, maybe_xai_keywords
+    from RAG.ai import embed_query, maybe_ai_keywords
 except ModuleNotFoundError:
     from models import Candidate
     from vector_store import VectorStore
-    from ai import embed_query, maybe_xai_keywords
+    from ai import embed_query, async_embed_query, maybe_ai_keywords
 import re
 
 _word_re = re.compile(r"\w+")
@@ -24,13 +24,20 @@ class VectorRetriever:
         self.store = VectorStore(store_dir)
         self.store.load()
 
-    def retrieve(self, query: str, topk: int) -> List[Candidate]:
-        qv = embed_query(query)
+    def _retrieve(self, qv: np.ndarray, topk: int) -> List[Candidate]:
         raw_hits = self.store.search(qv, topk)
         out: List[Candidate] = []
         for cid, score in raw_hits:
             out.append(Candidate(chunk=self.store.meta[cid], score=score))
         return out
+
+    def retrieve(self, query: str, topk: int) -> List[Candidate]:
+        qv = embed_query(query)
+        return self._retrieve(qv, topk)
+
+    async def async_retrieve(self, query: str, topk: int) -> List[Candidate]:
+        qv = async_embed_query(query)
+        return self._retrieve(qv, topk)
 
 
 class KeywordRetriever:
@@ -64,7 +71,7 @@ class KeywordRetriever:
         return out
 
     def retrieve_with_expanded_keywords(self, query: str, topk: int):
-        expanded = maybe_xai_keywords(query) or query
+        expanded = maybe_ai_keywords(query) or query
         phrases = [p.strip() for p in expanded.split(',') if p.strip()]
         tokens = []
         for p in phrases:

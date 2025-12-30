@@ -1,15 +1,15 @@
 from __future__ import annotations
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 try:
     from RAG.models import Candidate
     from RAG.retrievers import VectorRetriever, KeywordRetriever
-    from RAG.ai import maybe_xai_answer
+    from RAG.ai import maybe_ai_answer
 except ModuleNotFoundError:
     from models import Candidate
     from retrievers import VectorRetriever, KeywordRetriever
-    from ai import maybe_xai_answer
+    from ai import maybe_ai_answer
 
 
 MAX_CONTEXT_WORDS = int(os.getenv("RAG_MAX_CTX_WORDS", 100000))
@@ -20,12 +20,6 @@ def trim_by_words(text: str, max_words: int) -> str:
     if len(words) <= max_words:
         return text
     return " ".join(words[:max_words]) + " …"
-
-
-SYSTEM_PROMPT = (
-    "You are a careful assistant. Answer using ONLY the provided context. "
-    "If the answer is not in the context, say you don't know. Cite sources as [title](path)."
-)
 
 
 def build_context(cands: List[Candidate], max_words: int = MAX_CONTEXT_WORDS) -> str:
@@ -48,14 +42,14 @@ class Pipeline:
     def ask(self, query: str, k: int = 10, mode: str = "embed", action: str = "ask") -> Dict:
         mode = (mode or "embed").lower()
         action = (action or "ask").lower()  # 'retrieve' or 'ask'
-        result: Dict[str, object] = { 'meta': {'k': k, 'mode': mode, 'action': action} }
+        result: Dict[str, object] = {'meta': {'k': k, 'mode': mode, 'action': action}}
 
         def build_result(cands: List[Candidate]) -> Dict[str, object]:
             if action == 'retrieve':
                 ans = "(retrieve-only mode)"
             else:
                 ctx = build_context(cands)
-                llm = maybe_xai_answer(SYSTEM_PROMPT, query, ctx)
+                llm = maybe_ai_answer(query, ctx)
                 ans = llm if llm else "I don't have a generative model configured."
             cites = [{
                 'title': c.chunk.title,
@@ -86,5 +80,3 @@ class Pipeline:
             cands = self.vec.retrieve(query, topk=k)
             result.update(build_result(cands))
             return result
-
-

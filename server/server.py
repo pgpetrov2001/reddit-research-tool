@@ -30,11 +30,6 @@ KEY ARCHITECTURAL CHANGES FROM SYNC VERSION:
    - Type safety and better error messages
    - Auto-generated API documentation
 
-5. **AI API Calls**: Sync OpenAI client → AsyncOpenAI client
-   - Non-blocking API calls to xAI/Grok
-   - Multiple API calls can run concurrently
-   - Better resource utilization
-
 6. **File I/O**: Synchronous file reading → aiofiles (async file I/O)
    - Non-blocking comment file loading
    - Concurrent file reads across multiple subreddits
@@ -61,10 +56,6 @@ Classes:
     ResponseFormatter: Formats query results (mostly unchanged)
 """
 
-# ============================================================================
-# Imports - Async versions of libraries
-# ============================================================================
-
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware  # NEW: FastAPI CORS middleware
 from pydantic import BaseModel, Field, validator  # NEW: For request/response validation
@@ -73,7 +64,6 @@ import asyncio  # NEW: For async operations
 from contextlib import asynccontextmanager  # NEW: For lifespan management
 
 import json
-import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Union
 import sys
@@ -85,13 +75,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from RAG.retrievers import VectorRetriever
 from RAG.pipeline import build_context, SYSTEM_PROMPT
 from RAG.models import Candidate
+from RAG.ai import async_ai_answer, async_ai_topic
 
-# ARCHITECTURAL CHANGE: Import AsyncOpenAI instead of OpenAI for non-blocking API calls
-from openai import AsyncOpenAI
-import voyageai as voi
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # ============================================================================
 # Configuration (Unchanged from sync version)
@@ -116,13 +101,6 @@ class ServerConfig:
     PROJECT_ROOT: Path = Path(__file__).parent.parent
     SUBREDDITS_DIR: Path = PROJECT_ROOT / "SubReddits"
 
-    # API Keys (loaded from .env)
-    VOYAGE_AI_API_SECRET: str = os.getenv("VOYAGE_AI_API_SECRET", "")
-    VOYAGE_MODEL: str = os.getenv("VOYAGE_MODEL", "voyage-2")
-    XAI_API_KEY: str = os.getenv("XAI_API_KEY", "")
-    XAI_BASE_URL: str = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1")
-    XAI_CHAT_MODEL: str = os.getenv("XAI_CHAT_MODEL", "grok-beta")
-
     @classmethod
     def get_subreddit_directory(cls, subreddit: str) -> str:
         """
@@ -140,10 +118,8 @@ class ServerConfig:
 
 
 # ============================================================================
-# Pydantic Models - NEW: For request/response validation
+# Pydantic Models
 # ============================================================================
-# ARCHITECTURAL CHANGE: Replace manual JSON parsing with Pydantic models
-# Benefits: Type safety, automatic validation, better error messages, OpenAPI docs
 
 class SubredditItem(BaseModel):
     """
@@ -269,160 +245,19 @@ class ErrorResponse(BaseModel):
     status: str = "error"
     message: str
 
-
 # ============================================================================
-# Async AI Helper Functions - NEW
+# Async Query Processing
 # ============================================================================
-# ARCHITECTURAL CHANGE: Convert synchronous AI API calls to async
-# Old: Blocking OpenAI().chat.completions.create() calls
-# New: Non-blocking await AsyncOpenAI().chat.completions.create() calls
-# Benefits: Multiple API calls can run concurrently, server remains responsive
 
-async def async_embed_query(text: str) -> Any:
-    """
-    Asynchronously embed a query using Voyage AI.
-
-    ARCHITECTURAL CHANGE: This should ideally use async Voyage client,
-    but since voyageai doesn't provide async client yet, we run it in
-    a thread executor to avoid blocking the event loop.
-
-    Args:
-        text: Query text to embed
-
-    Returns:
-        Numpy array of embeddings
-    """
-    # Run blocking Voyage API call in thread executor to avoid blocking event loop
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _sync_embed_query, text)
-
-
-def _sync_embed_query(text: str):
-    """Synchronous helper for embed_query (runs in executor)."""
-    import numpy as np
-    if not ServerConfig.VOYAGE_AI_API_SECRET:
-        raise RuntimeError("VOYAGE_AI_API_SECRET is not set")
-    client = voi.Client(api_key=ServerConfig.VOYAGE_AI_API_SECRET)
-    resp = client.embed(texts=[text], model=ServerConfig.VOYAGE_MODEL, input_type="query")
-    vec = np.array([resp.embeddings[0]], dtype=np.float32)
-    norms = np.linalg.norm(vec, axis=1, keepdims=True) + 1e-12
-    vec = vec / norms
-    return vec
-
-
-async def async_xai_answer(system_prompt: str, query: str, context: str) -> Optional[str]:
-    """
-    Asynchronously generate an AI answer using xAI/Grok.
-
-    ARCHITECTURAL CHANGE: AsyncOpenAI client instead of OpenAI client.
-    This is the BIGGEST performance improvement - AI answer generation can take
-    2-10 seconds, and now it doesn't block other requests.
-
-    Args:
-        system_prompt: System instructions for the AI
-        query: User's question
-        context: Retrieved context from Reddit posts
-
-    Returns:
-        AI-generated answer or None if API key missing
-    """
-    if not ServerConfig.XAI_API_KEY:
-        return None
-    try:
-        # ARCHITECTURAL CHANGE: AsyncOpenAI with await
-        client = AsyncOpenAI(
-            api_key=ServerConfig.XAI_API_KEY,
-            base_url=ServerConfig.XAI_BASE_URL
-        )
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Context:\n\n{context}\n\nQuestion: {query}\nRespond with citations."}
-        ]
-        # await makes this non-blocking
-        resp = await client.chat.completions.create(
-            model=ServerConfig.XAI_CHAT_MODEL,
-            messages=messages,
-            temperature=0.0
-        )
-        return resp.choices[0].message.content
-    except Exception as e:
-        print(f"ERROR: xAI answer generation failed: {e}")
-        return None
-
-
-async def async_xai_topic(question: str) -> Optional[str]:
-    """
-    Asynchronously extract a single-word topic from a question using AI.
-
-    ARCHITECTURAL CHANGE: AsyncOpenAI client for non-blocking topic classification.
-
-    Args:
-        question: The question to extract a topic from
-
-    Returns:
-        A single-word topic string, or None if API key missing or error occurs
-    """
-    if not ServerConfig.XAI_API_KEY:
-        return None
-    if not question or not question.strip():
-        return None
-    try:
-        client = AsyncOpenAI(
-            api_key=ServerConfig.XAI_API_KEY,
-            base_url=ServerConfig.XAI_BASE_URL
-        )
-        messages = [
-            {"role": "system", "content": (
-                "You are a topic classifier. Given a question, respond with exactly ONE word "
-                "that best represents the main topic. Output only the single word, nothing else. "
-                "Examples: technology, health, finance, sports, politics, science, entertainment."
-            )},
-            {"role": "user", "content": question}
-        ]
-        resp = await client.chat.completions.create(
-            model=ServerConfig.XAI_CHAT_MODEL,
-            messages=messages,
-            temperature=0.0
-        )
-        topic = resp.choices[0].message.content.strip().lower()
-        # Ensure we only return a single word
-        if " " in topic:
-            topic = topic.split()[0]
-        return topic
-    except Exception as e:
-        print(f"ERROR: xAI topic classification failed: {e}")
-        return None
-
-
-# ============================================================================
-# Async Query Processing - CONVERTED
-# ============================================================================
-# ARCHITECTURAL CHANGE: Convert QueryProcessor.process_query() to async
-# Benefits: Can process multiple subreddits concurrently, AI calls don't block
 
 class AsyncQueryProcessor:
     """
     Asynchronous query processor.
-
-    ARCHITECTURAL CHANGE: All methods are now async (use 'async def' and 'await').
-    Old version processed subreddits sequentially and blocked on AI calls.
-    New version can process everything concurrently.
     """
 
     @staticmethod
     async def process_query(subreddits: List[str], question: str, k: int = ServerConfig.DEFAULT_TOP_K, is_paid: bool = True) -> Dict[str, Any]:
         """
-        ASYNC version of process_query - processes query across multiple subreddits.
-
-        ARCHITECTURAL CHANGES:
-        1. Method signature: def → async def
-        2. VectorRetriever operations: Could be parallelized (currently sequential for safety)
-        3. AI calls: Blocking calls → await async calls
-        4. Comment loading: Blocking file I/O → await async file I/O
-
-        PERFORMANCE IMPROVEMENT: While this request is waiting for AI answer generation,
-        the server can process other incoming requests concurrently.
-
         Args:
             subreddits: List of subreddit names to search
             question: The user's question
@@ -441,23 +276,12 @@ class AsyncQueryProcessor:
             try:
                 rag_store_dir = ServerConfig.get_subreddit_directory(subreddit)
 
-                # Check if RAG store directory exists
                 if not os.path.exists(rag_store_dir):
                     print(f"WARNING: RAG store for subreddit '{subreddit}' does not exist at {rag_store_dir}. Skipping...")
                     continue
 
-                # Retrieve candidates from vector database
-                # ARCHITECTURAL NOTE: VectorRetriever.retrieve() calls embed_query() which
-                # is still synchronous. For true async, we'd need to modify the RAG module.
-                # For now, we run it in thread executor to avoid blocking.
-                loop = asyncio.get_event_loop()
                 vec_db = VectorRetriever(rag_store_dir)
-                new_candidates = await loop.run_in_executor(
-                    None,
-                    vec_db.retrieve,
-                    question,
-                    k
-                )
+                new_candidates = await vec_db.async_retrieve(question, k)
                 candidates.extend(new_candidates)
                 print(f"Retrieved {len(new_candidates)} candidates from r/{subreddit}")
 
@@ -475,37 +299,15 @@ class AsyncQueryProcessor:
         # Select the top k candidates by score
         best_candidates = sorted(candidates, key=lambda x: -x.score)[:k]
 
-        # DEBUG: Print selected candidates
-        print(f"\n{'='*80}")
-        print(f"DEBUG: Selected {len(best_candidates)} best candidates")
-        print(f"{'='*80}")
-        for i, candidate in enumerate(best_candidates, 1):
-            print(f"\nCandidate #{i}:")
-            print(f"  Score: {candidate.score:.4f}")
-            print(f"  Post ID: {candidate.chunk.doc_id}")
-            print(f"  Title: {candidate.chunk.title[:100]}...")
-            print(f"  Section: {candidate.chunk.section}")
-            print(f"  Author: {candidate.chunk.author}")
-            print(f"  Text preview: {candidate.chunk.text[:200]}...")
-        print(f"{'='*80}\n")
-
-        # ARCHITECTURAL CHANGE: Classify topic asynchronously (non-blocking)
-        # Old: topic = maybe_xai_topic(question) - blocks for ~1 second
-        # New: topic = await async_xai_topic(question) - doesn't block event loop
         try:
-            topic = await async_xai_topic(question)
+            topic = await async_ai_topic(question)
             if topic:
                 print(f"DEBUG: Question topic classified as: {topic}")
             else:
-                print(f"DEBUG: Topic classification returned None")
+                print("DEBUG: Topic classification returned None")
         except Exception as e:
             print(f"WARNING: Topic classification failed: {e}")
             topic = None
-
-        # ARCHITECTURAL CHANGE: Generate AI answer asynchronously (non-blocking)
-        # Old: answer = maybe_xai_answer(...) - blocks for 2-10 seconds
-        # New: answer = await async_xai_answer(...) - doesn't block event loop
-        # This is the MOST CRITICAL change - AI generation is the slowest operation
 
         # Check if user has paid access
         if not is_paid:
@@ -515,17 +317,15 @@ class AsyncQueryProcessor:
             context = build_context(best_candidates)
 
             # DEBUG: Print context being used
-            print(f"\n{'='*80}")
+            print(f"\n{'=' * 80}")
             print(f"DEBUG: Context built for AI (length: {len(context)} chars)")
-            print(f"{'='*80}")
-            print(context[:500] + "..." if len(context) > 500 else context)
-            print(f"{'='*80}\n")
+            print(f"{'=' * 80}")
 
             try:
-                print("DEBUG: Calling async_xai_answer...")
-                answer = await async_xai_answer(SYSTEM_PROMPT, question, context)
+                print("DEBUG: Calling async_ai_answer...")
+                answer = await async_ai_answer(question, context)
                 if not answer:
-                    print("DEBUG: async_xai_answer returned None, using fallback answer")
+                    print("DEBUG: async_ai_answer returned None, using fallback answer")
                     answer = "AI summary could not be generated at this time. Please check the relevant posts below for information."
                 else:
                     print(f"DEBUG: Got answer from AI (length: {len(answer)} chars)")
@@ -535,9 +335,6 @@ class AsyncQueryProcessor:
 
             print(f"\nDEBUG: Final answer: {answer[:200]}..." if len(answer) > 200 else f"\nDEBUG: Final answer: {answer}")
 
-        # ARCHITECTURAL CHANGE: Load comments asynchronously (non-blocking file I/O)
-        # Old: posts = ResponseFormatter.format_posts(...) - blocks on file reading
-        # New: posts = await AsyncResponseFormatter.format_posts(...) - async file I/O
         print(f"\nDEBUG: Loading comments for {len(best_candidates)} posts...")
         posts = await AsyncResponseFormatter.format_posts(best_candidates, subreddits)
         print(f"DEBUG: Formatted {len(posts)} posts")
@@ -592,7 +389,7 @@ class AsyncCommentLoader:
                 print(f"DEBUG [CommentLoader]:   Subreddit dir: {subreddit_dir}")
 
                 if not subreddit_dir.exists():
-                    print(f"DEBUG [CommentLoader]:   Directory does not exist, skipping")
+                    print("DEBUG [CommentLoader]:   Directory does not exist, skipping")
                     continue
 
                 # Look for comments file
@@ -603,11 +400,11 @@ class AsyncCommentLoader:
                     print(f"WARNING: Comments file not found for r/{subreddit}")
                     continue
 
-                print(f"DEBUG [CommentLoader]:   Opening file synchronously...")
+                print("DEBUG [CommentLoader]:   Opening file synchronously...")
 
                 # Synchronous file reading (faster for large files than aiofiles)
                 with open(comments_file, 'r', encoding='utf-8', errors='ignore') as f:
-                    print(f"DEBUG [CommentLoader]:   File opened, reading lines...")
+                    print("DEBUG [CommentLoader]:   File opened, reading lines...")
                     line_count = 0
                     # Read file line by line
                     for line in f:
@@ -843,11 +640,11 @@ class AsyncResponseFormatter:
             return
 
         # Print AI Summary
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("AI SUMMARY".center(80))
-        print("="*80)
+        print("=" * 80)
         print(response["answer"])
-        print("="*80)
+        print("=" * 80)
 
         # Print statistics
         print(f"\nTotal candidates retrieved: {response.get('total_candidates', 'N/A')}")
@@ -856,14 +653,14 @@ class AsyncResponseFormatter:
             print(f"Question topic: {response['topic']}")
 
         # Print posts
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("TOP RELEVANT POSTS".center(80))
-        print("="*80)
+        print("=" * 80)
 
         for i, post in enumerate(response["posts"], 1):
-            print(f"\n{'─'*80}")
+            print(f"\n{'─' * 80}")
             print(f"POST #{i}")
-            print(f"{'─'*80}")
+            print(f"{'─' * 80}")
             print(f"Title:      {post['title']}")
             print(f"Source:     {post['source']}")
             print(f"Score:      {post['score']:.4f}")
@@ -872,27 +669,27 @@ class AsyncResponseFormatter:
             print(f"Post ID:    {post.get('post_id', 'N/A')}")
             print(f"Link:       {post.get('link', 'N/A')}")
             print(f"Comments:   {len(post.get('comments', []))} comments")
-            print(f"\nFull Text:\n{'-'*80}")
+            print(f"\nFull Text:\n{'-' * 80}")
             print(post['text'])
-            print(f"{'-'*80}")
+            print(f"{'-' * 80}")
 
             # Print comments if available
             comments = post.get('comments', [])
             if comments:
                 print(f"\nComments ({len(comments)}):")
-                print(f"{'─'*80}")
+                print(f"{'─' * 80}")
                 for j, comment in enumerate(comments[:5], 1):
                     print(f"\n  Comment #{j} by {comment.get('author', 'Unknown')} (score: {comment.get('score', 0)})")
-                    print(f"  {'-'*76}")
+                    print(f"  {'-' * 76}")
                     comment_body = comment.get('body', '')
                     if len(comment_body) > 200:
                         comment_body = comment_body[:200] + "..."
                     print(f"  {comment_body}")
                 if len(comments) > 5:
                     print(f"\n  ... and {len(comments) - 5} more comments")
-                print(f"{'─'*80}")
+                print(f"{'─' * 80}")
 
-        print("\n" + "="*80 + "\n")
+        print("\n" + "=" * 80 + "\n")
 
 
 # ============================================================================
@@ -914,9 +711,9 @@ async def lifespan(app: FastAPI):
     - On shutdown: Cleanup resources
     """
     # Startup
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("FASTAPI ASYNC SERVER STARTING".center(80))
-    print(f"{'='*80}\n")
+    print(f"{'=' * 80}\n")
     print(f"Reddit Data Server running on port {ServerConfig.DEFAULT_PORT}...")
     print("Waiting for subreddit requests from the client...\n")
 
@@ -928,6 +725,7 @@ async def lifespan(app: FastAPI):
     # Shutdown
     heartbeat_task.cancel()
     print("\nShutting down server...")
+
 
 async def heartbeat():
     """
@@ -1038,9 +836,9 @@ async def query(request: QueryRequest):
     Raises:
         HTTPException: If query processing fails
     """
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("DEBUG: /query endpoint called")
-    print("="*80)
+    print("=" * 80)
 
     try:
         # Extract and log request data
@@ -1092,14 +890,14 @@ async def query(request: QueryRequest):
         AsyncResponseFormatter.print_query_results(response)
 
         # FastAPI automatically serializes the response to JSON
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("DEBUG: Sending response back to client")
         print(f"  Status: {response.get('status')}")
         print(f"  Answer length: {len(response.get('answer', ''))} chars")
         print(f"  Number of posts: {len(response.get('posts', []))}")
         print(f"  Total candidates: {response.get('total_candidates')}")
         print(f"  Topic: {response.get('topic')}")
-        print("="*80 + "\n")
+        print("=" * 80 + "\n")
 
         return response
 
