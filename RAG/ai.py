@@ -112,7 +112,7 @@ def ai_model_query(messages, temperature: float = 0.0) -> Optional[str]:
         return None
 
 
-def async_ai_model_query(messages, temperature: float = 0.0) -> Optional[str]:
+async def async_ai_model_query(messages, temperature: float = 0.0) -> Optional[str]:
     if not AI_API_KEY:
         return None
     try:
