@@ -75,7 +75,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from RAG.retrievers import VectorRetriever
 from RAG.pipeline import build_context
 from RAG.models import Candidate
-from RAG.ai import async_ai_answer, async_ai_topic
+from RAG.ai import maybe_async_ai_answer, maybe_async_ai_topic
 
 
 # ============================================================================
@@ -300,7 +300,7 @@ class AsyncQueryProcessor:
         best_candidates = sorted(candidates, key=lambda x: -x.score)[:k]
 
         try:
-            topic = await async_ai_topic(question)
+            topic = await maybe_async_ai_topic(question)
             if topic:
                 print(f"DEBUG: Question topic classified as: {topic}")
             else:

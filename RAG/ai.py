@@ -198,7 +198,7 @@ def maybe_ai_topic(question: str) -> Optional[str]:
     return _parse_topic(topic)
 
 
-async def async_ai_topic(question: str) -> Optional[str]:
+async def maybe_async_ai_topic(question: str) -> Optional[str]:
     """Extract a single-word topic from a question using AI.
 
     Args:
