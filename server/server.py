@@ -73,7 +73,7 @@ import os
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from RAG.retrievers import VectorRetriever
-from RAG.pipeline import build_context, SYSTEM_PROMPT
+from RAG.pipeline import build_context
 from RAG.models import Candidate
 from RAG.ai import async_ai_answer, async_ai_topic
 
