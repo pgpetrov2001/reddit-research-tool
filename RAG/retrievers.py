@@ -9,7 +9,7 @@ from rank_bm25 import BM25Okapi
 try:
     from RAG.models import Candidate
     from RAG.vector_store import VectorStore
-    from RAG.ai import embed_query, maybe_ai_keywords
+    from RAG.ai import embed_query, async_embed_query, maybe_ai_keywords
 except ModuleNotFoundError:
     from models import Candidate
     from vector_store import VectorStore
@@ -36,7 +36,7 @@ class VectorRetriever:
         return self._retrieve(qv, topk)
 
     async def async_retrieve(self, query: str, topk: int) -> List[Candidate]:
-        qv = async_embed_query(query)
+        qv = await async_embed_query(query)
         return self._retrieve(qv, topk)
 
 

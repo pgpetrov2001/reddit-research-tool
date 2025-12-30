@@ -322,10 +322,10 @@ class AsyncQueryProcessor:
             print(f"{'=' * 80}")
 
             try:
-                print("DEBUG: Calling async_ai_answer...")
-                answer = await async_ai_answer(question, context)
+                print("DEBUG: Calling maybe_async_ai_answer...")
+                answer = await maybe_async_ai_answer(question, context)
                 if not answer:
-                    print("DEBUG: async_ai_answer returned None, using fallback answer")
+                    print("DEBUG: maybe_async_ai_answer returned None, using fallback answer")
                     answer = "AI summary could not be generated at this time. Please check the relevant posts below for information."
                 else:
                     print(f"DEBUG: Got answer from AI (length: {len(answer)} chars)")
