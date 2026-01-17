@@ -15,6 +15,7 @@ class FetchResult:
     count: int
     file_path: Path
 
+
 class IntervalFetcher:
     def __init__(
         self,
@@ -57,11 +58,11 @@ class IntervalFetcher:
             self.initial_count_cb(self.worker_id, self.total_written)
         with path.open("a", encoding="utf-8") as handle:
             self._fetch_interval(after, before, handle)
-        
+
         # Signal completion
         if self.completion_cb:
             self.completion_cb(self.worker_id)
-        
+
         return FetchResult(count=self.total_written, file_path=path)
 
     def _try_resume(self, path: Path):
@@ -123,4 +124,3 @@ class IntervalFetcher:
                 return float(created)
             return parse_iso_ts(created).timestamp()
         raise ValueError("missing created_utc")
-

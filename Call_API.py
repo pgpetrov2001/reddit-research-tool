@@ -107,7 +107,7 @@ def download_kind(kind: str, api_factory, args) -> None:
         print(f"[{kind}] Before: {args.before}", flush=True)
     print(f"[{kind}] Workers: {args.workers}", flush=True)
     print(f"{'='*60}", flush=True)
-    
+
     base_dir = Path(args.outdir)
     worker_dir = base_dir / f"{kind}_workers"
     worker_dir.mkdir(parents=True, exist_ok=True)
@@ -115,7 +115,7 @@ def download_kind(kind: str, api_factory, args) -> None:
     print(f"[{kind}] Discovering existing worker files...", flush=True)
     existing = discover_worker_files(worker_dir)
     print(f"[{kind}] Found {len(existing)} existing worker files", flush=True)
-    
+
     if args.workers > 0 and len(existing) == args.workers and worker_files_range_same(existing, args.after, args.before):
         print(f"[{kind}] Existing worker files match configuration, reusing partitions", flush=True)
         plans = [WorkerPlan(interval=(info[1], info[2]), expected=info[3]) for info in existing]
@@ -139,7 +139,7 @@ def download_kind(kind: str, api_factory, args) -> None:
     if total_estimate:
         print(f"[{kind}] Total expected items: {total_estimate}", flush=True)
     print(f"[{kind}] Starting {len(plans)} worker(s)...", flush=True)
-    
+
     # Initialize progress with resume counts if files exist
     initial_counts = get_resume_counts(kind, worker_dir, plans)
     progress = ProgressTracker(kind, plans, total=total_estimate or None, initial_counts=initial_counts)
@@ -168,7 +168,7 @@ def download_kind(kind: str, api_factory, args) -> None:
 
     final_path = base_dir / f"{args.subreddit}.{kind}.jsonl"
     existing_count, new_count, duplicate_count = merge_worker_outputs([res.file_path for res in results], final_path, kind)
-    
+
     print(f"[{kind}] Merge complete → {final_path}", flush=True)
     print(f"[{kind}]   Existing items: {existing_count}", flush=True)
     print(f"[{kind}]   New items added: {new_count}", flush=True)

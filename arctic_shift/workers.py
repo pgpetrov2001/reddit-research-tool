@@ -77,7 +77,7 @@ def _locate_partition(ts: dt.datetime, boundaries: List[Tuple[Optional[dt.dateti
     for idx, (start_dt, end_dt) in enumerate(boundaries):
         if (start_dt is None or ts >= start_dt) and (end_dt is None or ts < end_dt):
             return idx
-    
+
     # Assign to first/last partition if unbounded
     if boundaries:
         if boundaries[0][0] is None:  # First has unbounded start
@@ -94,26 +94,26 @@ def _read_and_classify_rows(
 ) -> List[List[Tuple[str, dt.datetime]]]:
     """
     Read JSON objects from old worker files and distribute them into the new partitions.
-    
+
     Returns a list where each element is a list of tuples: (json_line, timestamp).
     json_line is the full JSON object as a string, timestamp is parsed for sorting.
 
     Each list consists of all the elements from the old worker file that belong to the same partition.
     """
     partition_data: List[List[Tuple[str, dt.datetime]]] = [[] for _ in range(num_partitions)]
-    
+
     for old_path in existing_files:
         if not old_path.exists():
             print(f"[WARNING] Worker file {old_path} which was detected a moment ago no longer exists")
             continue
-        
+
         try:
             with old_path.open("r", encoding="utf-8") as reader:
                 for line_number, json_line in enumerate(reader, start=1):
                     json_line = json_line.strip()
                     if not json_line:
                         continue
-                    
+
                     try:
                         # Parse JSON to extract created_utc timestamp for classification
                         json_obj = json.loads(json_line)
@@ -124,7 +124,7 @@ def _read_and_classify_rows(
                     except (json.JSONDecodeError, ValueError) as e:
                         print(f"[WARNING] Invalid JSON line in existing worker file {old_path} on line {line_number}. Error: {e}. JSON line: {json_line}")
                         continue
-                    
+
                     # Classify this JSON object into the appropriate partition
                     plan_idx = _locate_partition(timestamp, boundaries)
                     if plan_idx is not None and plan_idx < num_partitions:
@@ -132,7 +132,7 @@ def _read_and_classify_rows(
                         partition_data[plan_idx].append((json_line, timestamp))
         except OSError as e:
             print(f"[WARNING] Failed to read worker file {old_path}: {e}")
-    
+
     return partition_data
 
 
@@ -150,13 +150,13 @@ def _delete_existing_worker_files(existing_files: Sequence[Path]) -> List[Path]:
 def _write_worker_files(target_paths: List[Path], partition_data: List[List[Tuple[str, dt.datetime]]]) -> None:
     """
     Sort JSON objects by timestamp and write them to their corresponding worker files.
-    
+
     Each tuple contains (json_line, timestamp) where json_line is the full JSON object.
     """
     for path, json_objects in zip(target_paths, partition_data):
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # Sort by timestamp to maintain chronological order
         json_objects.sort(key=lambda x: x[1])
 
@@ -164,7 +164,7 @@ def _write_worker_files(target_paths: List[Path], partition_data: List[List[Tupl
             for json_line, _ in json_objects:
                 handle.write(json_line + "\n")
             handle.flush()
-        
+
         if path.exists():
             path.unlink()
         tmp.replace(path)
@@ -179,19 +179,19 @@ def prepare_worker_files(
 ) -> None:
     """
     Redistribute data from old worker files into new partition files.
-    
+
     If no worker files exist but subreddit is provided, attempts to
     read from the final output file ({subreddit}.{kind}.jsonl) and redistribute from there.
     """
     if not plans:
         return
-    
+
     worker_dir = base_dir / f"{kind}_workers"
     target_paths = [worker_path_for(kind, worker_dir, idx + 1, plan.interval, plan.expected) for idx, plan in enumerate(plans)]
-    
+
     # Collect file paths to redistribute
     file_paths: List[Path] = []
-    
+
     # Extract paths from existing worker files
     if existing_files:
         file_paths = [path for path, *_ in existing_files]
@@ -212,7 +212,7 @@ def prepare_worker_files(
             path.parent.mkdir(parents=True, exist_ok=True)
             path.touch(exist_ok=True)
         return
-    
+
     boundaries = [
         (parse_iso_ts(start) if start else None, parse_iso_ts(end) if end else None)
         for start, end in (plan.interval for plan in plans)
@@ -257,4 +257,3 @@ def run_workers(
         for fut in as_completed(futures):
             results.append(fut.result())
     return results
-
