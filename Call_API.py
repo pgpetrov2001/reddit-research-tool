@@ -86,7 +86,7 @@ def planned_partitions(
         parts, totals = compute_partitions(
             after=after, before=before, workers=workers, histogram=histogram, frequency=frequency
         )
-    
+
     total_expected = sum(t for t in totals if t is not None) if totals else 0
     print(f"[{kind}] Partitioned into {len(parts)} partitions, expected total: {total_expected}", flush=True)
     return [WorkerPlan(interval=part, expected=totals[idx]) for idx, part in enumerate(parts)]
@@ -99,14 +99,15 @@ def merge_worker_outputs(paths: List[Path], dest: Path, kind: str) -> Tuple[int,
 
 
 def download_kind(kind: str, api_factory, args) -> None:
-    print(f"\n{'='*60}", flush=True)
+    print(f"\n{'=' * 60}", flush=True)
     print(f"[{kind}] Starting download for subreddit: {args.subreddit}", flush=True)
     if args.after:
         print(f"[{kind}] After: {args.after}", flush=True)
     if args.before:
         print(f"[{kind}] Before: {args.before}", flush=True)
-    print(f"[{kind}] Workers: {args.workers}", flush=True)
-    print(f"{'='*60}", flush=True)
+    if args.workers:
+        print(f"[{kind}] Workers: {args.workers}", flush=True)
+    print(f"{'=' * 60}", flush=True)
 
     base_dir = Path(args.outdir)
     worker_dir = base_dir / f"{kind}_workers"
@@ -116,8 +117,8 @@ def download_kind(kind: str, api_factory, args) -> None:
     existing = discover_worker_files(worker_dir)
     print(f"[{kind}] Found {len(existing)} existing worker files", flush=True)
 
-    if args.workers > 0 and len(existing) == args.workers and worker_files_range_same(existing, args.after, args.before):
-        print(f"[{kind}] Existing worker files match configuration, reusing partitions", flush=True)
+    if args.resume or (args.workers > 0 and len(existing) == args.workers and worker_files_range_same(existing, args.after, args.before)):
+        print(f"[{kind}] Reusing existing worker files", flush=True)
         plans = [WorkerPlan(interval=(info[1], info[2]), expected=info[3]) for info in existing]
     else:
         print(f"[{kind}] Computing new partitions...", flush=True)
@@ -180,8 +181,13 @@ def download_kind(kind: str, api_factory, args) -> None:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Download subreddit data from Arctic Shift API with worker partitioning.")
     parser.add_argument("-s", "--subreddit", required=True)
-    parser.add_argument("--after", type=parse_iso_date, help="ISO8601 start, inclusive", required=True)
-    parser.add_argument("--before", type=parse_iso_date, help="ISO8601 end, exclusive", required=True)
+    parser.add_argument("-r", "--resume", action="store_true", help=(
+        "Resume scraping subreddit from existing worker files in specified output directory.\n"
+        "Reuses paritioned time ranges and expected counts for each one, by inferring them from the names of existing worker files.\n"
+        "In this mode the arguments --after, --before, --workers, --force-histogram are ignored."
+    ))
+    parser.add_argument("--after", type=parse_iso_date, help="ISO8601 start, inclusive", required=False)
+    parser.add_argument("--before", type=parse_iso_date, help="ISO8601 end, exclusive", required=False)
     parser.add_argument("--workers", type=int, default=4, help="Number of worker splits")
     parser.add_argument("--what", choices=["posts", "comments", "both"], default="both")
     parser.add_argument("--outdir", help="Output directory", required=True)
@@ -218,21 +224,40 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "parent_id",
         ],
     )
+
     return parser
+
+
+def validate_args(parser, args) -> None:
+    if not args.resume:
+        if args.after is None:
+            parser.error("--after is required unless --resume is used")
+        if args.before is None:
+            parser.error("--before is required unless --resume is used")
+        if args.workers is None:  # Though it has a default, enforce if you want it explicitly set.
+            parser.error("--workers is required unless --resume is used")
+    else:
+        if args.after is not None:
+            print("WARNING: --after is ignored when --resume is used", flush=True)
+        if args.before is not None:
+            print("WARNING: --before is ignored when --resume is used", flush=True)
+        if args.workers is not None:
+            print("WARNING: --workers is ignored when --resume is used", flush=True)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    validate_args(parser, args)
 
     print(f"Starting download for subreddit: {args.subreddit}", flush=True)
     print(f"Output directory: {args.outdir}", flush=True)
-    
+
     if args.what in ("posts", "both"):
         download_kind("posts", ArcticShiftAPI, args)
     if args.what in ("comments", "both"):
         download_kind("comments", ArcticShiftAPI, args)
-    
+
     print("\nDownload complete!", flush=True)
 
 
