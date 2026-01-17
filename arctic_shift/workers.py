@@ -237,6 +237,7 @@ def run_workers(
     plans: Sequence[WorkerPlan],
     progress_cb: Callable[[int, int], None],
     completion_cb: Optional[Callable[[int], None]] = None,
+    initial_count_cb: Optional[Callable[[int, int], None]] = None,
 ) -> List[FetchResult]:
     results: List[FetchResult] = []
     with ThreadPoolExecutor(max_workers=len(plans) or 1) as executor:
@@ -252,6 +253,7 @@ def run_workers(
                 worker_id=idx,
                 progress_cb=progress_cb,
                 completion_cb=completion_cb,
+                initial_count_cb=initial_count_cb,
             )
             futures.append(executor.submit(fetcher.run, plan.interval, plan.expected))
         for fut in as_completed(futures):

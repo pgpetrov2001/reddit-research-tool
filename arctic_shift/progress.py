@@ -4,7 +4,6 @@ import os
 import sys
 import threading
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 if TYPE_CHECKING:
@@ -17,17 +16,11 @@ class ProgressTracker:
         label: str,
         plans: List[WorkerPlan],
         total: Optional[int] = None,
-        initial_counts: Optional[Dict[int, int]] = None,
     ) -> None:
         self.label = label
         self.plans = plans
         self.total = total
         self.counts: Dict[int, int] = {i: 0 for i in range(len(plans))}
-        self.initial_counts: Dict[int, int] = {i: 0 for i in range(len(plans))}
-        if initial_counts:
-            for idx, count in initial_counts.items():
-                if 0 <= idx < len(plans):
-                    self._apply_initial_count(idx, count)
         self.start_time: float = time.time()
         self.worker_start_times: Dict[int, float] = {}  # Track when each worker first reports progress
         self.worker_completed: Dict[int, bool] = {i: False for i in range(len(plans))}  # Track completion status
@@ -36,6 +29,7 @@ class ProgressTracker:
         self._printed = False
         self._num_lines = 0  # Track how many lines we've printed
         self.use_colors = self._supports_color()
+        self.initial_counts = {i: 0 for i in range(len(plans))}  # Track initial counts for resume support
 
     def _supports_color(self) -> bool:
         """Check if terminal supports color output."""
@@ -54,7 +48,7 @@ class ProgressTracker:
         """Add color to text if terminal supports it."""
         if not self.use_colors:
             return text
-        
+
         colors = {
             'green': '\033[92m',
             'yellow': '\033[93m',
@@ -114,10 +108,10 @@ class ProgressTracker:
             spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
             idx = int(time.time() * 2) % len(spinner_chars)
             return f"[{spinner_chars[idx]} working...]"
-        
+
         filled = int((current / total) * width)
         filled = min(filled, width)
-        
+
         if is_completed:
             # Show as complete regardless of percentage
             bar = "=" * width
@@ -148,12 +142,12 @@ class ProgressTracker:
         """Format estimated time to completion."""
         if speed <= 0 or remaining <= 0:
             return "--:--:--"
-        
+
         seconds = remaining / speed
         if seconds > 359999:  # > 99 hours
             days = seconds / 86400
             return f"{days:.1f}d"
-        
+
         hours = int(seconds // 3600)
         minutes = int((seconds % 3600) // 60)
         secs = int(seconds % 60)
@@ -189,43 +183,43 @@ class ProgressTracker:
             self._clear_previous_output()
         else:
             self._printed = True
-        
+
         current_time = time.time()
         total_elapsed = current_time - self.start_time
-        
+
         lines = []
-        
+
         # Header line
         elapsed_str = self._colored(self._format_time(total_elapsed), "gray")
         lines.append(f"{self._colored('●', 'green')} [{self.label}] Progress (elapsed: {elapsed_str})")
-        
+
         # Per-worker lines
         for i, plan in enumerate(self.plans):
             count = self.counts.get(i, 0)
             initial_count = self.initial_counts.get(i, 0)
             fetched_since_start = count - initial_count
             is_completed = self.worker_completed.get(i, False)
-            
+
             expected = plan.expected
-            
+
             # Build progress bar
             bar = self._make_progress_bar(count, expected, width=20, is_completed=is_completed)
-            
+
             # Calculate speed
             speed = self._get_worker_speed(i, fetched_since_start, current_time)
             display_speed = self.worker_speed_snapshot.get(i, speed) if is_completed else speed
             speed_str = self._format_speed(display_speed)
-            
+
             if expected is not None and expected > 0:
                 pct = (count / expected) * 100
-                
+
                 # Completion marker or ETA
                 if is_completed:
                     status = self._colored("✓", "green")
                 else:
                     eta = self._format_eta(expected - count, speed)
                     status = f"ETA: {eta}"
-                
+
                 # Format with resume info if applicable
                 if initial_count > 0:
                     resume_info = self._colored(f"(+{fetched_since_start})", "yellow")
@@ -238,29 +232,29 @@ class ProgressTracker:
                     status = self._colored("✓", "green")
                 else:
                     status = "working..."
-                
+
                 if initial_count > 0:
                     resume_info = self._colored(f"(+{fetched_since_start})", "yellow")
                     lines.append(f"  W{i+1}: {bar} {count:>6} {resume_info} │ {speed_str:>8} │ {status}")
                 else:
                     lines.append(f"  W{i+1}: {bar} {count:>6} │ {speed_str:>8} │ {status}")
-        
+
         # Total line
         total_fetched = sum(self.counts.values())
         total_initial = sum(self.initial_counts.values())
         total_fetched_since_start = total_fetched - total_initial
         total_expected = sum(p.expected for p in self.plans if p.expected is not None)
-        
+
         if total_expected and total_expected > 0:
             total_pct = (total_fetched / total_expected) * 100
             bar = self._make_progress_bar(total_fetched, total_expected, width=20)
             total_speed = total_fetched_since_start / total_elapsed if total_elapsed > 0 else 0
             speed_str = self._format_speed(total_speed)
             eta = self._format_eta(total_expected - total_fetched, total_speed)
-            
+
             # Separator line
             lines.append(f"  {'─' * 70}")
-            
+
             if total_initial > 0:
                 resume_info = self._colored(f"(+{total_fetched_since_start})", "yellow")
                 lines.append(f"  {self._colored('Total', 'cyan')}: {bar} {total_fetched:>6}/{total_expected:<6} {total_pct:>5.1f}% {resume_info} │ {speed_str:>8} │ ETA: {eta}")
@@ -271,18 +265,18 @@ class ProgressTracker:
             lines.append(f"  {'─' * 70}")
             total_speed = total_fetched_since_start / total_elapsed if total_elapsed > 0 else 0
             speed_str = self._format_speed(total_speed)
-            
+
             if total_initial > 0:
                 resume_info = self._colored(f"(+{total_fetched_since_start})", "yellow")
                 lines.append(f"  {self._colored('Total', 'cyan')}: {total_fetched:>6} {resume_info} │ {speed_str:>8}")
             else:
                 lines.append(f"  {self._colored('Total', 'cyan')}: {total_fetched:>6} │ {speed_str:>8}")
-        
+
         # Print all lines
         output = "\n".join(lines) + "\n"
         sys.stdout.write(output)
         sys.stdout.flush()
-        
+
         self._num_lines = len(lines)
 
     def close(self) -> None:

@@ -15,7 +15,7 @@ from arctic_shift.workers import (
     worker_files_range_same,
     run_workers,
 )
-from arctic_shift.progress import ProgressTracker, get_resume_counts
+from arctic_shift.progress import ProgressTracker
 from arctic_shift.merge import merge_sorted_jsonl
 from arctic_shift.aggregation import ensure_histogram, FREQUENCY_ORDER
 
@@ -142,8 +142,7 @@ def download_kind(kind: str, api_factory, args) -> None:
     print(f"[{kind}] Starting {len(plans)} worker(s)...", flush=True)
 
     # Initialize progress with resume counts if files exist
-    initial_counts = get_resume_counts(kind, worker_dir, plans)
-    progress = ProgressTracker(kind, plans, total=total_estimate or None, initial_counts=initial_counts)
+    progress = ProgressTracker(kind, plans, total=total_estimate or None)
     # Print initial progress
     progress.print_initial()
     try:
@@ -156,6 +155,7 @@ def download_kind(kind: str, api_factory, args) -> None:
             plans=plans,
             progress_cb=progress.update,
             completion_cb=progress.mark_completed,
+            initial_count_cb=progress.set_initial_count,
         )
     finally:
         progress.close()
