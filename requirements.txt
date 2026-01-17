@@ -5,6 +5,7 @@ tqdm
 faiss-cpu
 fastapi
 uvicorn
+aiofiles
 openai
 python-dotenv
 voyageai
