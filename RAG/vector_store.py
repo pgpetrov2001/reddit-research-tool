@@ -44,5 +44,3 @@ class VectorStore:
             if cid:
                 hits.append((cid, float(score)))
         return hits
-
-
